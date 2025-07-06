@@ -6,7 +6,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-
 def run_strategy(df: pd.DataFrame, config: dict, **params) -> dict:
     # load strategy fn
     mod_name  = config['strategy']['module']
