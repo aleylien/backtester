@@ -1,5 +1,5 @@
 import argparse
-import copy
+from copy import deepcopy
 import json
 import logging
 import os
@@ -163,7 +163,7 @@ def main():
     logging.basicConfig(level=getattr(logging, args.log))
     cfg = load_config(args.config)
 
-    # load fees & slippage mapping
+    # --- load fees & slippage mapping ---
     mapping_file = cfg['fees']['mapping']
     ext = os.path.splitext(mapping_file)[1].lower()
     if ext == '.json':
@@ -176,135 +176,201 @@ def main():
     comm_pct = fee_row['commission_pct']
     slip_pct = fee_row['slippage_pct']
 
-    # create run folder
+    # --- create unique, human-readable run folder and save config ---
     base_out = cfg['output']['root']
-    now = datetime.now()
+    now      = datetime.now()
     run_name = now.strftime("%H:%M %d.%m.%Y") + f" ({cfg['strategy']['module']})"
-    run_out = os.path.join(base_out, run_name)
+    run_out  = os.path.join(base_out, run_name)
     os.makedirs(run_out, exist_ok=True)
     with open(os.path.join(run_out, "config_used.json"), "w") as f:
         json.dump(cfg, f, indent=2)
     print(f"Running into → {run_out}")
 
-    # single-asset backtest
-    combined = run_single_backtest(cfg, comm_usd, comm_pct, slip_pct)
+    # toggle: per-asset subfolders?
+    save_per_asset = bool(cfg['output'].get('save_per_asset', 0))
 
-    # summary of optimization results
-    results = run_backtest(
-        DataLoader(
-            data_dir=cfg['data']['path'],
-            symbol=cfg['data']['symbol'],
-            timeframe=cfg['data']['timeframe'],
-            base_timeframe=cfg['data'].get('base_timeframe')
-        ).load(), cfg
-    )
-    df_summary = results.set_index('bundle')
-    cols = ['train_bars','test_bars'] + \
-           [c for c in df_summary.columns if not c.startswith('oos_')] + \
-           [c for c in df_summary.columns if c.startswith('oos_')]
-    cols = [c for c in cols if c in df_summary.columns]
-    df_summary = df_summary[cols]
-    print("\nBundle summary:")
-    print(df_summary.to_string(float_format="%.4f"))
-    df_summary.to_csv(os.path.join(run_out, 'bundle_summary.csv'), index=False)
-    print(f"Bundle summary saved to {run_out}/bundle_summary.csv")
-
-    # save raw results and diagnostics
-    results.to_csv(os.path.join(run_out, 'results.csv'), index=False)
-    combined.to_csv(os.path.join(run_out,'details_all_bundles.csv'), index=False)
-    print(f"CSV outputs saved to {run_out}")
-
-    # plots for single asset
-    oos = combined[combined['sample']=='OOS']
-    fig, ax = plt.subplots()
-    for b, grp in oos.groupby('bundle'):
-        eq = grp['equity']/grp['equity'].iloc[0]
-        x = np.arange(len(eq))
-        ax.plot(x, eq.values, label=f'Bundle {b}')
-    ax.set_title("OOS Equity Curves")
-    ax.legend()
-    fig.savefig(os.path.join(run_out,'equity_all_bundles.png'), bbox_inches='tight')
-    plt.close(fig)
-    fig, ax = plt.subplots()
-    for b, grp in oos.groupby('bundle'):
-        dd = grp['drawdown']
-        x = np.arange(len(dd))
-        ax.plot(x, dd.values, label=f'Bundle {b}')
-    ax.set_title("OOS Drawdowns")
-    ax.legend()
-    fig.savefig(os.path.join(run_out,'drawdown_all_bundles.png'), bbox_inches='tight')
-    plt.close(fig)
-
-    # statistics and tests
-    compute_statistics(combined, run_out)
-    resp = input("Proceed with permutation & bootstrap tests? [y/N]: ").strip().lower()
-    if resp.startswith('y'):
-        statistical_tests(
-            combined, run_out,
-            bootstrap_reps=cfg['tests'].get('bootstrap_reps',1000),
-            permutation_reps=cfg['tests'].get('permutation_reps',1000)
-        )
+    # load portfolio instruments (if any)
+    instruments = cfg.get('portfolio', {}).get('instruments', None)
+    if instruments:
+        # compute weights & total capital
+        weights, total_capital = get_portfolio_weights(instruments)
     else:
-        print("Skipping statistical tests.")
+        # single asset => one “instrument”
+        instruments = [{
+            'symbol': cfg['data']['symbol'],
+            'fees_mapping': cfg['fees']['mapping'],
+            'strategy':     cfg['strategy'],
+            'param_grid':   cfg['optimization']['param_grid'],
+            'capital':      cfg.get('optimization',{}).get('capital', 100_000)
+        }]
+        weights, total_capital = [1.0], instruments[0]['capital']
 
-    # equal-weight portfolio
-    if 'portfolio' in cfg:
-        rets = {}
-        symbols_order = []
-        # run each instrument
-        for inst in cfg['portfolio']['instruments']:
-            symbols_order.append(inst['symbol'])
-            # load that instrument's fees
-            with open(inst['fees_mapping']) as f:
-                inst_fees = json.load(f)
-            fr = inst_fees[inst['symbol']]
-            cu, cp, sp = fr['commission_usd'], fr['commission_pct'], fr['slippage_pct']
+    # collect per-instrument stats for the final combined_stats.csv
+    all_stats = {}
 
-            # build a per‐instrument cfg copy
-            inst_cfg = copy.deepcopy(cfg)
-            inst_cfg['data']['symbol']             = inst['symbol']
-            inst_cfg['fees']['mapping']            = inst['fees_mapping']
-            inst_cfg['strategy']                   = inst['strategy']
-            inst_cfg['optimization']['param_grid'] = inst['param_grid']
+    # for each instrument (or just one, if no portfolio)
+    for idx, inst in enumerate(instruments):
+        # -------------------------------
+        # 1) build instrument-specific config
+        # -------------------------------
+        inst_cfg = deepcopy(cfg)
+        inst_cfg['data']['symbol'] = inst['symbol']
+        inst_cfg['fees']['mapping'] = inst['fees_mapping']
+        inst_cfg['strategy'] = inst['strategy']
+        inst_cfg['optimization']['param_grid'] = inst['param_grid']
 
-            combined_inst = run_single_backtest(inst_cfg, cu, cp, sp)
-            oos_inst = combined_inst[combined_inst['sample']=='OOS']
-            # per‐instrument daily returns
-            rets[inst['symbol']] = oos_inst['pnl'] / inst.get('capital', 100_000)
+        # split the total capital by weight
+        inst_capital = total_capital * weights[idx]
+        # **ensure** that your strategy uses this capital by inserting it into the param grid
+        inst_cfg['optimization']['param_grid']['capital'] = [inst_capital]
 
-        # turn into DataFrame, preserving original instrument order
-        rets_df = pd.DataFrame({s: rets[s] for s in symbols_order}).fillna(0.0)
+        # -------------------------------
+        # 2) create sub-folder
+        # -------------------------------
+        folder_name = 'portfolio' if (idx == len(instruments)-1 and instruments!=[inst]) else inst['symbol']
+        out_sub = os.path.join(run_out, folder_name)
+        os.makedirs(out_sub, exist_ok=True)
 
-        # get weights & total capital
-        weights, total_cap = get_portfolio_weights(cfg['portfolio']['instruments'])
+        # -------------------------------
+        # 3) load data & backtest
+        # -------------------------------
+        dl = DataLoader(
+            data_dir=inst_cfg['data']['path'],
+            symbol=inst_cfg['data']['symbol'],
+            timeframe=inst_cfg['data']['timeframe'],
+            base_timeframe=inst_cfg['data'].get('base_timeframe')
+        )
+        df = dl.load()
+        # date filter
+        start, end = inst_cfg['data'].get('start'), inst_cfg['data'].get('end')
+        if start or end:
+            df = df.loc[start or df.index[0] : end or df.index[-1]]
+            logging.info(f"Filtered {inst['symbol']} to {df.index[0]}→{df.index[-1]} ({len(df):,} bars)")
+        logging.info(f"Loaded {len(df):,} bars for {inst['symbol']}")
 
-        # portfolio return & equity
-        port_ret    = (rets_df * weights).sum(axis=1)
-        port_equity = (1 + port_ret).cumprod() * total_cap
+        # run the IS/OOS walk-forward
+        results = run_backtest(df, inst_cfg)
 
-        # save & plot
-        port_equity.to_csv(os.path.join(run_out, 'portfolio_equity.csv'),
-                           header=['equity'])
-        fig, ax = plt.subplots()
-        port_equity.plot(ax=ax)
-        ax.set_title("Equal-Weight Portfolio Equity")
-        fig.savefig(os.path.join(run_out, 'portfolio_equity.png'),
-                    bbox_inches='tight')
+        # --- bundle summary table & CSV ---
+        df_sum = results.set_index('bundle')
+        cols   = []
+        for c in ['train_bars','test_bars']:
+            if c in df_sum.columns: cols.append(c)
+        cols += [c for c in df_sum.columns if not c.startswith('oos_')]
+        cols += [c for c in df_sum.columns if c.startswith('oos_')]
+        df_sum = df_sum[cols]
+        print(f"\nBundle summary for {folder_name}:")
+        print(df_sum.to_string(float_format="%.4f"))
+        df_sum.to_csv(os.path.join(out_sub,'bundle_summary.csv'))
+
+        # --- raw results.csv & diagnostics.csv + charts ---
+        results.to_csv(os.path.join(out_sub,'results.csv'), index=False)
+        print(f"Results → {folder_name}/results.csv")
+
+        # splits
+        splits = list(generate_splits(df, cfg['optimization']['bundles']))
+        print(f"\nDate ranges for {folder_name}:")
+        for i,(tr,te) in enumerate(splits,1):
+            print(f"  Bundle {i}: IS {tr.index[0].date()}→{tr.index[-1].date()}, "
+                  f"OOS {te.index[0].date()}→{te.index[-1].date()}")
+        print()
+
+        # collect per-bundle diagnostics & plot equity / drawdown
+        all_diags = []
+        strat_mod = import_module(f"backtester.strategies.{inst_cfg['strategy']['module']}")
+        strat_fn  = getattr(strat_mod, inst_cfg['strategy']['function'])
+        for (_, row), (tr,te) in zip(results.iterrows(), splits):
+            b = int(row['bundle'])
+            params = {
+                k: row[k] for k in results.columns
+                if k not in ('bundle',)
+                   and not k.startswith('oos_')
+                   and not k.startswith('_')
+            }
+            # ensure int window
+            if 'vol_window' in params:
+                params['vol_window'] = int(params['vol_window'])
+
+            for sample, subset in (('IS',tr),('OOS',te)):
+                pos_df = strat_fn(subset, **params)
+                pnl_df = simulate_pnl(
+                    positions    = pos_df['position'],
+                    price        = subset['close'],
+                    multiplier   = params['multiplier'],
+                    fx           = params['fx'],
+                    capital      = params.get('capital',100_000),
+                    commission_usd = comm_usd,
+                    commission_pct = comm_pct,
+                    slippage_pct   = slip_pct,
+                )
+                diag = pos_df.join(
+                    pnl_df[[
+                        'price_diff','prev_pos','pnl_price',
+                        'delta_pos','cost_usd','cost_pct','slip_cost',
+                        'pnl','equity','drawdown'
+                    ]],
+                    how='left', rsuffix='_pnl'
+                )
+                diag['bundle'] = b
+                diag['sample'] = sample
+                all_diags.append(diag)
+
+        combined = pd.concat(all_diags, ignore_index=False)
+        combined.index.name = 'date'
+        combined = combined.reset_index()
+        combined.to_csv(os.path.join(out_sub,'details_all_bundles.csv'),index=False)
+        print(f"Diagnostics → {folder_name}/details_all_bundles.csv")
+
+        # plot OOS equity
+        oos = combined[combined['sample']=='OOS']
+        fig,ax = plt.subplots()
+        for b,grp in oos.groupby('bundle'):
+            eq = grp['equity']/grp['equity'].iloc[0]
+            x  = np.arange(len(eq))
+            ax.plot(x, eq.values, label=f'B{b}')
+        ax.set_title(f"OOS Equity Curves ({folder_name})")
+        ax.set_xlabel("Bar # since OOS start")
+        ax.set_ylabel("Equity (start=1.0)")
+        ax.legend(ncol=2, fontsize='small')
+        fig.savefig(os.path.join(out_sub,'equity_all_bundles.png'),bbox_inches='tight')
         plt.close(fig)
-        print(f"Portfolio equity chart saved to {run_out}/portfolio_equity.png")
 
-        # compute portfolio stats
-        df_port = pd.DataFrame({
-            'date': port_equity.index,
-            'pnl': port_ret * total_cap,
-            'equity': port_equity,
-            'drawdown': (port_equity.cummax() - port_equity) / port_equity.cummax(),
-            'delta_pos': 0,  # ← add this
-            'sample': 'OOS',
-            'bundle': 1
-        })
-        compute_statistics(df_port, run_out)
-        generate_summary_md(run_out, cfg)
+        # plot OOS drawdown
+        fig,ax = plt.subplots()
+        for b,grp in oos.groupby('bundle'):
+            dd = grp['drawdown']
+            x  = np.arange(len(dd))
+            ax.plot(x, dd.values, label=f'B{b}')
+        ax.set_title(f"OOS Drawdowns ({folder_name})")
+        ax.set_xlabel("Bar # since OOS start")
+        ax.set_ylabel("Drawdown")
+        ax.legend(ncol=2, fontsize='small')
+        fig.savefig(os.path.join(out_sub,'drawdown_all_bundles.png'),bbox_inches='tight')
+        plt.close(fig)
+
+        # compute & save full statistics (includes monthly histogram)
+        stats = compute_statistics(combined, out_sub)
+        all_stats[folder_name] = stats
+
+    # end per-instrument loop
+
+    # --- combined_stats.csv across all instruments + portfolio ---
+    df_comb = pd.DataFrame.from_dict(all_stats, orient='index')
+    df_comb.to_csv(os.path.join(run_out,'combined_stats.csv'))
+    print(f"\nCombined stats → {run_out}/combined_stats.csv")
+
+    # --- optional tests on portfolio only ---
+    if cfg.get('tests'):
+        resp = input("\nProceed with permutation & bootstrap tests on portfolio? [y/N]: ").strip().lower()
+        if resp.startswith('y'):
+            statistical_tests(
+                None,  # inside the util we’ll pick up only the “portfolio” group in combined
+                run_out,
+                bootstrap_reps=cfg['tests'].get('bootstrap_reps',1000),
+                permutation_reps=cfg['tests'].get('permutation_reps',1000),
+            )
+        else:
+            print("Skipping portfolio statistical tests.")
 
 
 if __name__ == '__main__':

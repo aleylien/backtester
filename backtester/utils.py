@@ -218,6 +218,8 @@ def compute_statistics(combined: pd.DataFrame, run_out: str) -> None:
     plt.close(fig)
     print(f"Drawdown duration vs magnitude chart saved to {fp3}\n")
 
+    return agg_stats
+
 
 def statistical_tests(combined: pd.DataFrame, run_out: str,
                       bootstrap_reps: int = 1000,
