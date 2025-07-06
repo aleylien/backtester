@@ -11,7 +11,7 @@ strategy:
 
 optimization:
   bundles: 10
-  target: 'sharpe'
+  target: max_drawdown      # one of: sharpe, profit_factor, max_drawdown
   param_grid:
     _module:     ['ewmac']
     _function:   ['ewmac']

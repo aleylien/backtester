@@ -1,9 +1,10 @@
 import pandas as pd
-from sklearn.model_selection import ParameterGrid
+from numpy import inf
+from itertools import product
 from backtester.utils import run_strategy
 
 
-def generate_splits(df, n_splits):
+def generate_splits(df: pd.DataFrame, n_splits: int):
     """
     Sliding window with
       IS_length  = 4*w
@@ -32,44 +33,76 @@ def generate_splits(df, n_splits):
         yield is_df, oos_df
 
 
-def optimize_strategy(train_df: pd.DataFrame, param_grid: dict, target: str):
+def optimize_strategy(
+    df: pd.DataFrame,
+    param_grid: dict,
+    target: str,
+    config: dict
+) -> dict:
     """
-    Loop through param_grid, run your strategy on train_df,
-    and return the params that best optimize `target` (e.g. min drawdown).
-    Stub: replace `run_strategy` with your actual strategy call.
+    Brute‐force search over param_grid.  For each params dict:
+      metrics = run_strategy(df, config, **params)
+    then picks the params that maximize/minimize the chosen target.
     """
-    best = None
-    best_score = float('inf') if target == 'max_drawdown' else float('-inf')
-    for params in ParameterGrid(param_grid):
-        # TODO: implement your strategy logic returning a dict of metrics
-        metrics = run_strategy(train_df, **params)
-        score = metrics[target]
-        if (target == 'max_drawdown' and score < best_score) or \
-           (target != 'max_drawdown' and score > best_score):
-            best_score = score
-            best = params
-    return best
+    best_score  = -inf
+    best_params = None
+
+    # Cartesian product of all grid values
+    for vals in product(*(param_grid[k] for k in param_grid)):
+        params = dict(zip(param_grid.keys(), vals))
+        metrics = run_strategy(df, config, **params)
+
+        if target == 'sharpe':
+            score = metrics['sharpe']
+        elif target == 'pnl':
+            score = metrics.get('pnl',
+                       metrics['equity'][-1] - metrics['equity'][0])
+        elif target == 'profit_factor':
+            score = metrics['profit_factor']
+        elif target == 'max_drawdown':
+            # minimize drawdown ⇒ maximize negative
+            score = -metrics['max_drawdown']
+        else:
+            raise ValueError(f"Unknown optimization target: {target!r}")
+
+        if score > best_score:
+            best_score, best_params = score, params
+
+    return best_params
 
 
-def run_backtest(df: pd.DataFrame, config: dict):
+def run_backtest(df: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """
+    Walk‐forward backtest:
+     1) Split into n bundles
+     2) For each bundle:
+        a) Optimize on the IS slice
+        b) Evaluate chosen params on the OOS slice
+        c) Collect OOS metrics (sharpe, pnl, profit_factor, max_drawdown, etc.)
+     3) Return one row per bundle with best‐params + oos_<metric>.
+    """
     n_bundles = config['optimization']['bundles']
     target    = config['optimization']['target']
+    grid      = config['optimization']['param_grid']
 
     results = []
 
     for i, (train_df, test_df) in enumerate(generate_splits(df, n_bundles), start=1):
-        print(f"Bundle {i}/{n_bundles}: "
-              f"train={len(train_df):,} bars, "
-              f"test={len(test_df):,} bars")
+        print(f"Bundle {i}/{n_bundles}: train={len(train_df):,} bars, test={len(test_df):,} bars")
 
-        best_params = optimize_strategy(train_df, config['optimization']['param_grid'], target)
+        # a) find best params on IS
+        best_params = optimize_strategy(train_df, grid, target, config)
         print(f"  → Best params: {best_params}")
 
-        oos = run_strategy(test_df, **best_params)
-        print(f"  → OOS {target.upper()}: {oos[target]:.4f}\n")
+        # b) evaluate on OOS
+        metrics = run_strategy(test_df, config, **best_params)
+        print(f"  → OOS {target.upper()}: {metrics[target]:.4f}\n")
 
-        row = {'bundle': i, **best_params, **{f"oos_{k}": v for k,v in oos.items()}}
+        # c) record row
+        row = {'bundle': i}
+        row.update(best_params)
+        for k, v in metrics.items():
+            row[f"oos_{k}"] = v
         results.append(row)
 
     return pd.DataFrame(results)
-
