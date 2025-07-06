@@ -1,0 +1,73 @@
+data:
+  path: './assets_data/all_time'
+  symbol: 'SP500'      # needed for the “single‐asset” branch
+  timeframe: '1d'
+  start: '2000-01-01'
+  end:   '2020-12-31'
+
+strategy:
+  module: 'ewmac'
+  function: 'ewmac'
+
+optimization:
+  bundles: 10
+  target: max_drawdown
+  param_grid:
+    span_short:    [10, 16, 20]
+    span_long:     [50, 64, 80]
+    vol_window:    [32]
+    forecast_scale: [4.1]
+    cap:           [20]
+    weight:        [1.0]
+    tau:           [0.2]
+    capital:       [100000]
+    idm:           [1.0]
+    multiplier:    [5.0]
+    fx:            [1.0]
+
+output:
+  root: './backtests'
+  save_equity_curve: true
+  save_drawdown_chart: true
+
+fees:
+  mapping: '/Users/aleylien/Desktop/backtester/fees and slippage/fees.json'
+
+# === new portfolio block ===
+portfolio:
+  instruments:
+    - symbol: 'SP500'
+      fees_mapping: '/Users/aleylien/Desktop/backtester/fees and slippage/fees.json'
+      strategy:
+        module: 'ewmac'
+        function: 'ewmac'
+      param_grid:
+        span_short:    [10, 16, 20]
+        span_long:     [50, 64, 80]
+        vol_window:    [32]
+        forecast_scale: [4.1]
+        cap:           [20]
+        weight:        [1.0]
+        tau:           [0.2]
+        capital:       [100000]
+        idm:           [1.0]
+        multiplier:    [5.0]
+        fx:            [1.0]
+
+    - symbol: 'EURUSD'
+      fees_mapping: '/Users/aleylien/Desktop/backtester/fees and slippage/fees.json'
+      strategy:
+        module: 'ewmac'
+        function: 'ewmac'
+      param_grid:
+        span_short:    [10, 16, 20]
+        span_long:     [50, 64, 80]
+        vol_window:    [32]
+        forecast_scale: [5.0]
+        cap:           [10]
+        weight:        [1.0]
+        tau:           [1.0]
+        capital:       [100000]
+        idm:           [1.0]
+        multiplier:    [50.0]
+        fx:            [1.0]

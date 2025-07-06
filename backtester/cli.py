@@ -102,6 +102,62 @@ def run_single_backtest(cfg, comm_usd, comm_pct, slip_pct):
     return combined.reset_index()
 
 
+def generate_summary_md(run_out, cfg):
+    def df_to_markdown(df: pd.DataFrame) -> str:
+        cols = df.columns.tolist()
+        # header
+        header = "| " + " | ".join(cols) + " |"
+        # separator
+        sep = "| " + " | ".join("---" for _ in cols) + " |"
+        # rows
+        rows = []
+        for _, row in df.iterrows():
+            rows.append("| " + " | ".join(str(x) for x in row.tolist()) + " |")
+        return "\n".join([header, sep] + rows)
+
+    md_lines = [
+        f"# Backtest Summary: {os.path.basename(run_out)}",
+        f"**Strategy:** `{cfg['strategy']['module']}.{cfg['strategy']['function']}`",
+        f"**Run date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        ""
+    ]
+
+    # Per-Bundle Summary
+    summary_csv = os.path.join(run_out, 'bundle_summary.csv')
+    if os.path.exists(summary_csv):
+        df = pd.read_csv(summary_csv)
+        md_lines += ["## Per-Bundle Summary", df_to_markdown(df), ""]
+
+    # Aggregate Strategy Statistics
+    stats_csv = os.path.join(run_out, 'strategy_statistics.csv')
+    if os.path.exists(stats_csv):
+        df = pd.read_csv(stats_csv)
+        md_lines += ["## Aggregate Strategy Statistics", df_to_markdown(df), ""]
+
+    # Images
+    for title, fname in [
+        ("OOS Equity Curves",         "equity_all_bundles.png"),
+        ("OOS Drawdowns",             "drawdown_all_bundles.png"),
+        ("Monthly Return Distribution","monthly_return_distribution.png"),
+        ("Drawdown Distribution",     "drawdown_distribution.png"),
+        ("Drawdown Duration vs Magnitude","dd_duration_vs_magnitude.png")
+    ]:
+        if os.path.exists(os.path.join(run_out, fname)):
+            md_lines += [f"## {title}", f"![{title}]({fname})", ""]
+
+    # Portfolio
+    if 'portfolio' in cfg:
+        pe = os.path.join(run_out, 'portfolio_equity.png')
+        if os.path.exists(pe):
+            md_lines += ["## Equal-Weight Portfolio Equity", f"![Portfolio Equity](portfolio_equity.png)", ""]
+
+    # write out
+    with open(os.path.join(run_out, 'summary.md'), 'w') as f:
+        f.write("\n".join(md_lines))
+
+    print(f"Generated summary.md → {os.path.join(run_out,'summary.md')}")
+
+
 def main():
     args = parse_args()
     logging.basicConfig(level=getattr(logging, args.log))
@@ -248,6 +304,7 @@ def main():
             'bundle': 1
         })
         compute_statistics(df_port, run_out)
+        generate_summary_md(run_out, cfg)
 
 
 if __name__ == '__main__':
