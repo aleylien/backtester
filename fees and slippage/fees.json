@@ -1,0 +1,12 @@
+{
+  "SP500": {
+    "commission_usd": 1.0,
+    "commission_pct": 0.0,
+    "slippage_pct": 0.0002
+  },
+  "EURUSD": {
+    "commission_usd": 0.0,
+    "commission_pct": 0.0,
+    "slippage_pct": 0.00005
+  }
+}
