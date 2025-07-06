@@ -10,12 +10,10 @@ A modular Python CLI for walk-forward backtesting, diagnostics, and portfolio ba
 
 ## Quickstart
 
-1. Rename the example config:
-   mv config_example.yaml strategy_config.yaml
-2. Edit strategy_config.yaml to set your data.symbol, strategy.module/function, optimization.param_grid, fees mapping, and (optionally) a portfolio: block.
-3. Run a backtest:
+1. Edit strategy_config.yaml to set your data.symbol, strategy.module/function, optimization.param_grid, fees mapping, and (optionally) a portfolio: block.
+2. Run a backtest:
    python -m backtester.cli -c strategy_config.yaml
-4. Inspect your run folder under output.root/, which now contains:
+3. Inspect your run folder under output.root/, which now contains:
    - bundle_summary.csv, results.csv, details_all_bundles.csv
    - PNGs for equity, drawdowns, distributions
    - strategy_statistics.csv
