@@ -158,26 +158,26 @@ def compute_statistics(combined: pd.DataFrame, run_out: str) -> None:
     print(f"Strategy statistics saved to {os.path.join(run_out, 'strategy_statistics.csv')}")
 
     # --- Monthly return distribution with 95% CI ---
-    monthly_rets = pd.concat([
-        g['equity'].resample('ME').last().pct_change().dropna()
-        for _, g in oos.groupby('bundle')
-    ])
-    mean_m, std_m = monthly_rets.mean(), monthly_rets.std()
-    ci_low  = mean_m - 1.96*std_m/np.sqrt(len(monthly_rets))
-    ci_high = mean_m + 1.96*std_m/np.sqrt(len(monthly_rets))
-
-    fig, ax = plt.subplots()
-    ax.hist(monthly_rets, bins=20, edgecolor='black')
-    ax.axvline(ci_low, color='red', linestyle='--', label='95% CI')
-    ax.axvline(ci_high, color='red', linestyle='--')
-    ax.set_title("Monthly Return Distribution with 95% CI")
-    ax.set_xlabel("Return")
-    ax.set_ylabel("Frequency")
-    ax.legend()
-    fp = os.path.join(run_out, "monthly_return_distribution.png")
-    fig.savefig(fp, bbox_inches='tight')
-    plt.close(fig)
-    print(f"Monthly return distribution chart saved to {fp}")
+    # monthly_rets = pd.concat([
+    #     g['equity'].resample('ME').last().pct_change().dropna()
+    #     for _, g in oos.groupby('bundle')
+    # ])
+    # mean_m, std_m = monthly_rets.mean(), monthly_rets.std()
+    # ci_low  = mean_m - 1.96*std_m/np.sqrt(len(monthly_rets))
+    # ci_high = mean_m + 1.96*std_m/np.sqrt(len(monthly_rets))
+    #
+    # fig, ax = plt.subplots()
+    # ax.hist(monthly_rets, bins=20, edgecolor='black')
+    # ax.axvline(ci_low, color='red', linestyle='--', label='95% CI')
+    # ax.axvline(ci_high, color='red', linestyle='--')
+    # ax.set_title("Monthly Return Distribution with 95% CI")
+    # ax.set_xlabel("Return")
+    # ax.set_ylabel("Frequency")
+    # ax.legend()
+    # fp = os.path.join(run_out, "monthly_return_distribution.png")
+    # fig.savefig(fp, bbox_inches='tight')
+    # plt.close(fig)
+    # print(f"Monthly return distribution chart saved to {fp}")
 
     # --- Drawdown distribution histogram ---
     dd_vals = oos['drawdown'].dropna()

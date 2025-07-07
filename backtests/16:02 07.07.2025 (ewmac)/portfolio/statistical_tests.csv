@@ -1,0 +1,2 @@
+bootstrap_mean_0.1%,bootstrap_mean_1%,bootstrap_mean_5%,bootstrap_mean_10%,bootstrap_log_pf_0.1%,bootstrap_log_pf_1%,bootstrap_log_pf_5%,bootstrap_log_pf_10%,bootstrap_dd_0.1%,bootstrap_dd_1%,bootstrap_dd_5%,bootstrap_dd_10%,avg_bootstrap_dd,p_value_mean,p_value_log_pf,p_value_dd
+-8.653011114683703e-10,-6.845865757157675e-10,-4.437114650653492e-10,-3.0591928949181803e-10,-0.11162059582654442,-0.08886313018079231,-0.05779335516937517,-0.039817118831248985,5.508463011038023e-07,6.59103559765839e-07,7.746279084785978e-07,8.687242554761276e-07,1.5810942345443335e-06,1.0,1.0,0.7

@@ -1,6 +1,5 @@
 data:
   path: './assets_data/all_time'
-  symbol: 'SP500'
   timeframe: '1d'
   start: '2000-01-01'
   end:   '2020-12-31'
@@ -32,7 +31,7 @@ output:
   save_per_asset: 1      # ← 1 = save per‐asset folders + combined_stats.csv
 
 fees:
-  mapping: './fees/fees.json'
+  mapping: './fees and slippage/fees.json'
 
 portfolio:
   instruments:
