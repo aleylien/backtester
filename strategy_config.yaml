@@ -1,16 +1,19 @@
+# data / universe definitions
 data:
   path: './assets_data/all_time'
   timeframe: '1d'
   start: '2000-01-01'
   end:   '2020-12-31'
 
+# default strategy (used if no per-asset override)
 strategy:
-  module: 'ewmac'
+  module:   'ewmac'
   function: 'ewmac'
 
+# global optimization defaults (can be overridden per-strategy below)
 optimization:
   bundles: 10
-  target: max_drawdown
+  target:  profit_factor
   param_grid:
     _module:       ['ewmac']
     _function:     ['ewmac']
@@ -24,23 +27,37 @@ optimization:
     multiplier:    [5.0]
     fx:            [1.0]
 
+# where to write backtests, charts, etc.
 output:
-  root: './backtests'
-  save_equity_curve: true
+  root:               './backtests'
+  save_equity_curve:   true
   save_drawdown_chart: true
-  save_per_asset: 1      # ← 1 = save per‐asset folders + combined_stats.csv
+  save_per_asset:      1
 
+# fee schedule
 fees:
   mapping: './fees and slippage/fees.json'
 
+# ──────────────────────────────────────────────────────────────────────────────
 portfolio:
-  instruments:
-    - symbol: 'SP500'
-      capital:     100000
-      fees_mapping: './fees/fees.json'
-      strategy:
-        module:   'ewmac'
-        function: 'ewmac'
+  # single total capital for the whole run
+  capital: 100000
+
+  # optional weights per asset (must sum to 1.0; will normalize otherwise)
+#  weights:
+#    SP500: 0.6
+#    DAX:   0.4
+
+  # 1) list all tickers once
+  assets:
+    - SP500
+    - DAX
+
+  # 2) define each strategy once (up to 10 strategies)
+  strategies:
+    ewmac:
+      module:   'ewmac'
+      function: 'ewmac'
       param_grid:
         span_short:    [10, 16, 20]
         span_long:     [50, 64, 80]
@@ -51,20 +68,11 @@ portfolio:
         idm:           [1.0]
         multiplier:    [5.0]
         fx:            [1.0]
+    # (add more strategy blocks here as needed)
 
-    - symbol: 'DAX'
-      capital:     100000
-      fees_mapping: './fees/fees.json'
-      strategy:
-        module:   'ewmac'
-        function: 'ewmac'
-      param_grid:
-        span_short:    [10, 16, 20]
-        span_long:     [50, 64, 80]
-        vol_window:    [32]
-        forecast_scale: [5.0]
-        cap:           [20]
-        tau:           [0.2]
-        idm:           [1.0]
-        multiplier:    [5.0]
-        fx:            [1.0]
+  # 3) map tickers → list of strategy‐keys; use `default:` for the bulk
+  assignments:
+    default: [ewmac]
+    # you can override per-ticker, e.g.:
+    # SP500: [ewmac, momentum]
+    # DAX:   [momentum]

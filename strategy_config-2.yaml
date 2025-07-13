@@ -1,0 +1,71 @@
+data:
+  path: './assets_data/all_time'
+  timeframe: '1d'
+  start: '2000-01-01'
+  end:   '2020-12-31'
+
+strategy:
+  module: 'ewmac'
+  function: 'ewmac'
+
+optimization:
+  bundles: 10
+  target: max_drawdown
+  param_grid:
+    _module:       ['ewmac']
+    _function:     ['ewmac']
+    span_short:    [10, 16, 20]
+    span_long:     [50, 64, 80]
+    vol_window:    [32]
+    forecast_scale: [4.1]
+    cap:           [20]
+    tau:           [0.2]
+    idm:           [1.0]
+    multiplier:    [5.0]
+    fx:            [1.0]
+
+output:
+  root:                 './backtests'
+  save_equity_curve:     true
+  save_drawdown_chart:   true
+  save_per_asset:        1
+
+fees:
+  mapping: './fees and slippage/fees.json'
+
+portfolio:
+  # ← single source of truth for TOTAL starting equity:
+  capital: 100000
+
+#  # ← optional: explicit per-symbol weights (must sum to 1.0; will normalize)
+#  weights:
+#    SP500: 0.6
+#    DAX:   0.4
+
+  instruments:
+    - symbol:      'SP500'
+      fees_mapping: './fees/fees.json'
+      # we still need each instrument’s own param_grid to override global:
+      param_grid:
+        span_short:    [10, 16, 20]
+        span_long:     [50, 64, 80]
+        vol_window:    [32]
+        forecast_scale: [4.1]
+        cap:           [20]
+        tau:           [0.2]
+        idm:           [1.0]
+        multiplier:    [5.0]
+        fx:            [1.0]
+
+    - symbol:      'DAX'
+      fees_mapping: './fees/fees.json'
+      param_grid:
+        span_short:    [10, 16, 20]
+        span_long:     [50, 64, 80]
+        vol_window:    [32]
+        forecast_scale: [5.0]
+        cap:           [20]
+        tau:           [0.2]
+        idm:           [1.0]
+        multiplier:    [5.0]
+        fx:            [1.0]

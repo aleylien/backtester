@@ -17,21 +17,36 @@ from backtester.pnl_engine import simulate_pnl
 from backtester.utils import compute_statistics, statistical_tests
 
 
-def get_portfolio_weights(instruments):
+def get_portfolio_weights(instruments, portfolio_cfg):
     """
-    Returns
+    Returns:
       - weights: list of floats summing to 1.0 (one per instrument)
-      - total_capital: sum of each instrument's 'capital' field (or default 100k)
+      - total_capital: float from portfolio_cfg['capital']
     """
-    n = len(instruments)
-    if n == 0:
-        raise ValueError("No instruments provided to portfolio_weights")
+    # 1) Read TOTAL capital from portfolio.capital; fallback to old per-inst sum
+    total_capital = portfolio_cfg.get(
+        'capital',
+        sum(inst.get('capital', 100_000) for inst in instruments)
+    )
 
-    # equal‐weight for now
-    weights = [1.0 / n for _ in instruments]
+    # 2) Read portfolio.weights (dict or list), else equal-weight
+    wcfg = portfolio_cfg.get('weights')
+    if isinstance(wcfg, dict):
+        raw     = [wcfg.get(inst['symbol'], 0.0) for inst in instruments]
+        total_w = sum(raw) or 1.0
+        weights = [r / total_w for r in raw]
 
-    # sum up each instrument's capital (default to 100k if absent)
-    total_capital = sum(inst.get('capital', 100_000) for inst in instruments)
+    elif isinstance(wcfg, (list, tuple)):
+        if len(wcfg) != len(instruments):
+            raise ValueError("portfolio.weights list must match instruments")
+        total_w = sum(wcfg) or 1.0
+        weights = [w / total_w for w in wcfg]
+
+    else:
+        n = len(instruments)
+        if n == 0:
+            raise ValueError("No instruments provided")
+        weights = [1.0 / n] * n
 
     return weights, total_capital
 
@@ -179,19 +194,30 @@ def main():
     # Determine whether to create per-asset subfolders
     save_per_asset = bool(cfg['output'].get('save_per_asset', 0))
 
-    # Build list of instruments
-    instruments = cfg.get('portfolio', {}).get('instruments', [])
-    if not instruments:
-        instruments = [{
-            'symbol':       cfg['data']['symbol'],
-            'fees_mapping': cfg['fees']['mapping'],
-            'strategy':     cfg['strategy'],
-            'param_grid':   cfg['optimization']['param_grid'],
-            'capital':      cfg['optimization'].get('capital', 100_000)
-        }]
+    # build the full instrument list dynamically
+    portfolio_cfg = cfg['portfolio']
+    assets = portfolio_cfg['assets']
+    strat_defs = portfolio_cfg['strategies']
+    assign_map = portfolio_cfg.get('assignments', {})
+    default_strs = assign_map.get('default', list(strat_defs.keys()))
+
+    instruments = []
+    for symbol in assets:
+        strat_keys = assign_map.get(symbol, default_strs)
+        for sk in strat_keys:
+            sdef = strat_defs[sk]
+            instruments.append({
+                'symbol': symbol,
+                'strategy': {'module': sdef['module'],
+                             'function': sdef['function']},
+                'param_grid': sdef.get('param_grid',
+                                       cfg['optimization']['param_grid']),
+                'fees_mapping': cfg['fees']['mapping']
+            })
 
     # Compute portfolio weights and total capital
-    weights, total_capital = get_portfolio_weights(instruments)
+    portfolio_cfg = cfg.get('portfolio', {})
+    weights, total_capital = get_portfolio_weights(instruments, portfolio_cfg)
 
     inst_stats     = {}
     portfolio_rets = {}
@@ -212,8 +238,14 @@ def main():
         inst_cfg = deepcopy(cfg)
         inst_cfg['data']['symbol']             = symbol
         inst_cfg['fees']['mapping']            = inst['fees_mapping']
-        inst_cfg['strategy']                   = inst['strategy']
-        inst_cfg['optimization']['param_grid'] = inst['param_grid']
+        # strategy: use per-inst if provided, else top-level
+        inst_cfg['strategy'] = inst.get('strategy', cfg['strategy'])
+
+        # param_grid: per-inst override if present, else global optimization.param_grid
+        inst_cfg['optimization']['param_grid'] = inst.get(
+            'param_grid',
+            cfg['optimization']['param_grid']
+        )
 
         # Allocate capital slice
         inst_capital = total_capital * w
@@ -243,8 +275,13 @@ def main():
         # Collect OOS diagnostics
         splits_inst = list(generate_splits(df_inst, inst_cfg['optimization']['bundles']))
         diags = []
-        strat_mod = import_module(f"backtester.strategies.{inst['strategy']['module']}")
-        strat_fn  = getattr(strat_mod, inst['strategy']['function'])
+        strat_mod = import_module(
+            f"backtester.strategies.{inst_cfg['strategy']['module']}"
+        )
+        strat_fn = getattr(
+            strat_mod,
+            inst_cfg['strategy']['function']
+        )
         for (_, row), (_, test_df) in zip(results_inst.iterrows(), splits_inst):
             params = {
                 k: row[k]
