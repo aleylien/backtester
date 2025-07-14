@@ -251,109 +251,111 @@ def compute_statistics(combined: pd.DataFrame, run_out: str) -> dict:
     return agg_stats
 
 
+def statistical_tests(
+    combined: pd.DataFrame,
+    run_out: str,
+    bootstrap_reps: int = 1000,
+    permutation_reps: int = 1000
+) -> None:
+    import numpy as np, pandas as pd, os
 
-def statistical_tests(combined: pd.DataFrame, run_out: str,
-                      bootstrap_reps: int = 1000,
-                      permutation_reps: int = 1000) -> None:
-    """
-    1) Bootstrap the OOS returns to bound:
-       - mean return
-       - log(profit factor)
-       - max drawdown
-       and compute average drawdown.
-    2) Permutation test on the same metrics to estimate p-values.
-    """
-    # prepare OOS returns
+    # 1) Prep OOS P&L returns
     df = combined.copy()
-    if 'date' in df.columns:
+    if 'date' in df:
         df['date'] = pd.to_datetime(df['date'])
         df.set_index('date', drop=True, inplace=True)
     oos = df[df['sample']=='OOS']
-    rets = oos['equity'].pct_change().dropna().values
-    N    = len(rets)
+    cap = oos['equity'].iloc[0]
+    if 'pnl' in oos:
+        ret_series = oos['pnl'] / cap
+    else:
+        ret_series = oos['equity'].pct_change().dropna()
+    # drop zero-PnL bars if any
+    ret_series = ret_series[ret_series != 0]
+    rets = ret_series.values
+    # print(f"Statistical tests: {len(rets)} non-zero return bars")
 
-    # actual metrics
-    actual_mean = rets.mean()
-    wins = rets[rets>0].sum()
-    loss = -rets[rets<0].sum()
-    actual_pf   = wins/loss if loss>0 else np.nan
+    # 2) Build equity & drawdown
+    eq = (1 + ret_series).cumprod() * cap
+    drawdown = (eq.cummax() - eq) / eq.cummax()
+    actual_dd = drawdown.max()
+
+    # 3) Actual metrics
+    actual_mean   = rets.mean()
+    wins          = rets[rets>0].sum()
+    loss          = -rets[rets<0].sum()
+    actual_pf     = wins/loss if loss>0 else np.nan
     actual_log_pf = np.log(actual_pf) if actual_pf>0 else np.nan
-    cum = np.cumsum(rets)
-    dd_actual = np.max(np.maximum.accumulate(cum) - cum)
 
-    # bootstrap distributions
-    bs_mean, bs_log_pf, bs_dd = [], [], []
+    N = len(rets)
+
+    # 4) Bootstrap distributions
+    bs_means, bs_log_pfs, bs_dds = [], [], []
     for _ in range(bootstrap_reps):
-        samp = np.random.choice(rets, size=N, replace=True)
-        bs_mean.append(samp.mean())
-        w = samp[samp>0].sum()
-        l = -samp[samp<0].sum()
+        samp = np.random.choice(rets, N, replace=True)
+        bs_means.append(samp.mean())
+        w = samp[samp>0].sum(); l = -samp[samp<0].sum()
         pf = w/l if l>0 else np.nan
-        bs_log_pf.append(np.log(pf) if pf>0 else np.nan)
-        cs = np.cumsum(samp)
-        bs_dd.append(np.max(np.maximum.accumulate(cs) - cs))
-    bs_mean = np.array(bs_mean)
-    bs_log_pf = np.array(bs_log_pf)
-    bs_dd = np.array(bs_dd)
+        bs_log_pfs.append(np.log(pf) if pf>0 else np.nan)
+        # build a proper pandas Series before cummax
+        eq_s = pd.Series(samp).add(1).cumprod().mul(cap)
+        dd_samp = (eq_s.cummax() - eq_s) / eq_s.cummax()
+        bs_dds.append(dd_samp.max())
 
-    # quantile bounds
-    def q(a, p): return np.nanpercentile(a, p*100)
-    for name, arr in (('Mean return', bs_mean),
-                      ('Log PF',    bs_log_pf),
-                      ('Drawdown',  bs_dd)):
-        print(f"\n{name} bootstrap quantiles:")
-        for p in (0.001, 0.01, 0.05, 0.10):
-            print(f"  {p:.3%}: {q(arr, p):.6f}")
-    print(f"\nAverage bootstrapped drawdown: {bs_dd.mean():.6f}")
-
-    # permutation p-values
-    perm_mean, perm_log_pf, perm_dd = [], [], []
+    # 5) Permutation distributions
+    perm_means, perm_log_pfs, perm_dds = [], [], []
     for _ in range(permutation_reps):
         perm = np.random.permutation(rets)
-        perm_mean.append(perm.mean())
-        w = perm[perm>0].sum()
-        l = -perm[perm<0].sum()
+        perm_means.append(perm.mean())
+        w = perm[perm>0].sum(); l = -perm[perm<0].sum()
         pf = w/l if l>0 else np.nan
-        perm_log_pf.append(np.log(pf) if pf>0 else np.nan)
-        cs = np.cumsum(perm)
-        perm_dd.append(np.max(np.maximum.accumulate(cs) - cs))
-    perm_mean = np.array(perm_mean)
-    perm_log_pf = np.array(perm_log_pf)
-    perm_dd = np.array(perm_dd)
+        perm_log_pfs.append(np.log(pf) if pf>0 else np.nan)
+        # same here: ensure a pandas Series for cummax
+        eq_p = pd.Series(perm).add(1).cumprod().mul(cap)
+        dd_perm = (eq_p.cummax() - eq_p) / eq_p.cummax()
+        perm_dds.append(dd_perm.max())
 
-    p_mean = np.mean(perm_mean >= actual_mean)
-    p_log_pf = np.mean(perm_log_pf >= actual_log_pf)
-    p_dd = np.mean(perm_dd >= dd_actual)
+    # — after collecting bs_means, bs_log_pfs, bs_dds and perm_dds —
 
-    print("\nPermutation test p-values:")
-    print(f"  Mean return p-value:           {p_mean:.4f}")
-    print(f"  Log profit-factor p-value:     {p_log_pf:.4f}")
-    print(f"  Drawdown p-value (≥ actual):   {p_dd:.4f}")
+    # (A) Ensure enough data
+    if len(rets) < 5:
+        print(f"Only {len(rets)} non-zero returns; skipping statistical tests.")
+        return
 
-    # 3) Save bootstrap & permutation test results to CSV helper to find quantiles
-    def q(arr, p): return np.nanpercentile(arr, p*100)
+    # (B) Quantiles to report (both tails)
+    quantiles = [0.001, 0.01, 0.05, 0.10, 0.90, 0.95, 0.99]
+    labels    = [f"{q*100:.1f}%" for q in quantiles]
 
-    results = {
-        'bootstrap_mean_0.1%':    q(bs_mean,   0.001),
-        'bootstrap_mean_1%':      q(bs_mean,   0.01),
-        'bootstrap_mean_5%':      q(bs_mean,   0.05),
-        'bootstrap_mean_10%':     q(bs_mean,   0.10),
-        'bootstrap_log_pf_0.1%':  q(bs_log_pf, 0.001),
-        'bootstrap_log_pf_1%':    q(bs_log_pf, 0.01),
-        'bootstrap_log_pf_5%':    q(bs_log_pf, 0.05),
-        'bootstrap_log_pf_10%':   q(bs_log_pf, 0.10),
-        'bootstrap_dd_0.1%':      q(bs_dd,     0.001),
-        'bootstrap_dd_1%':        q(bs_dd,     0.01),
-        'bootstrap_dd_5%':        q(bs_dd,     0.05),
-        'bootstrap_dd_10%':       q(bs_dd,     0.10),
-        'avg_bootstrap_dd':       bs_dd.mean(),
-        'p_value_mean':           p_mean,
-        'p_value_log_pf':         p_log_pf,
-        'p_value_dd':             p_dd
+    # (C) Build summary dict
+    summary = {
+        'actual_mean':       actual_mean,
+        'actual_log_pf':     actual_log_pf,
+        'actual_drawdown':   actual_dd,
+        'num_nonzero_rets':  len(rets),
     }
-    pd.DataFrame([results]).to_csv(
-        os.path.join(run_out, 'statistical_tests.csv'),
+
+    # Bootstrap quantiles
+    for q, lbl in zip(quantiles, labels):
+        summary[f"bs_mean_{lbl}"]    = np.quantile(bs_means,   q)
+        summary[f"bs_log_pf_{lbl}"]  = np.quantile(bs_log_pfs, q)
+        summary[f"bs_dd_{lbl}"]      = np.quantile(bs_dds,     q)
+
+    # Permutation quantiles (only for drawdown)
+    for q, lbl in zip(quantiles, labels):
+        summary[f"perm_dd_{lbl}"]    = np.quantile(perm_dds,   q)
+
+    # Averages
+    summary['avg_bs_dd']    = np.mean(bs_dds)
+    summary['avg_perm_dd']  = np.mean(perm_dds)
+
+    # P-values
+    summary['p_two_sided_mean']       = np.mean(np.abs(bs_means)   >= abs(actual_mean))
+    summary['p_two_sided_log_pf']     = np.mean(np.abs(bs_log_pfs) >= abs(actual_log_pf))
+    summary['p_one_sided_drawdown']   = np.mean(np.array(perm_dds) <= actual_dd)
+
+    # (D) Write out
+    pd.DataFrame([summary]).to_csv(
+        os.path.join(run_out, "statistical_tests.csv"),
         index=False
     )
-    print(f"Statistical test results saved to {os.path.join(run_out,'statistical_tests.csv')}")
-
+    print(f"Statistical tests saved to {run_out}/statistical_tests.csv")

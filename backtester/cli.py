@@ -329,15 +329,15 @@ def main():
         per_inst_results.append(combined_inst)
 
         # optional advanced tests
-        resp = input(f"Run permutation & bootstrap tests for {symbol}? [y/N]: ").strip().lower()
-        if resp.startswith('y'):
-            statistical_tests(
-                combined_inst, out_sub,
-                bootstrap_reps  = cfg.get('tests', {}).get('bootstrap_reps', 1000),
-                permutation_reps= cfg.get('tests', {}).get('permutation_reps', 1000)
-            )
-        else:
-            print(f"Skipping tests for {symbol}.")
+        # resp = input(f"Run permutation & bootstrap tests for {symbol}? [y/N]: ").strip().lower()
+        # if resp.startswith('y'):
+        #     statistical_tests(
+        #         combined_inst, out_sub,
+        #         bootstrap_reps  = cfg.get('tests', {}).get('bootstrap_reps', 1000),
+        #         permutation_reps= cfg.get('tests', {}).get('permutation_reps', 1000)
+        #     )
+        # else:
+        #     print(f"Skipping tests for {symbol}.")
 
     # --- 4) PORTFOLIO AGGREGATION via weighted returns -----------------------
     # build per-asset return series
