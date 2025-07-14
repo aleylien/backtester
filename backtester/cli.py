@@ -123,53 +123,135 @@ def run_single_backtest(cfg, comm_usd, comm_pct, slip_pct):
     return combined.reset_index()
 
 
-def generate_summary_md(run_out, cfg):
-    def df_to_markdown(df: pd.DataFrame) -> str:
-        cols = df.columns.tolist()
-        header = "| " + " | ".join(cols) + " |"
-        sep    = "| " + " | ".join("---" for _ in cols) + " |"
-        rows   = ["| " + " | ".join(str(x) for x in r) + " |" for r in df.values]
-        return "\n".join([header, sep] + rows)
+def df_to_markdown(df: pd.DataFrame, decimals: int = 2) -> str:
+    df = df.copy()
+    # Round all numeric columns
+    for c in df.select_dtypes(include=['float', 'int']).columns:
+        df[c] = df[c].round(decimals)
+    # Replace NaN/embed N/A
+    df = df.where(pd.notnull(df), "N/A").astype(str)
+    # Build Markdown
+    cols   = [str(c) for c in df.columns]
+    header = "| " + " | ".join(cols) + " |"
+    sep    = "| " + " | ".join("---" for _ in cols) + " |"
+    rows   = ["| " + " | ".join(r) + " |" for r in df.values]
+    return "\n".join([header, sep] + rows)
 
-    md_lines = [
-        f"# Backtest Summary: {os.path.basename(run_out)}",
-        f"**Strategy:** `{cfg['strategy']['module']}.{cfg['strategy']['function']}`",
-        f"**Run date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-        ""
-    ]
 
-    # Per‐bundle summary
-    summary_csv = os.path.join(run_out, 'bundle_summary.csv')
-    if os.path.exists(summary_csv):
-        df = pd.read_csv(summary_csv)
-        md_lines += ["## Per-Bundle Summary", df_to_markdown(df), ""]
+def generate_summary_md(run_out: str, cfg: dict):
+    md = []
+    md.append(f"# Backtest Summary: `{os.path.basename(run_out)}`")
+    md.append(f"**Run date:** {datetime.now():%Y-%m-%d %H:%M}")
+    md.append(f"**Strategy:** `{cfg['strategy']['module']}.{cfg['strategy']['function']}`")
+    md.append("")
 
-    # Strategy‐level stats
-    stats_csv = os.path.join(run_out, 'strategy_statistics.csv')
-    if os.path.exists(stats_csv):
-        df = pd.read_csv(stats_csv)
-        md_lines += ["## Aggregate Strategy Statistics", df_to_markdown(df), ""]
+    # --- Section 2: Combined Statistics ---
+    combined_csv = os.path.join(run_out, "combined_stats.csv")
+    if os.path.exists(combined_csv):
+        df = (pd.read_csv(combined_csv, index_col=0)
+                .reset_index()
+                .rename(columns={'index':'Instrument'}))
+        # Format percentages
+        for pct in ['cagr','annual_vol','max_drawdown','avg_drawdown','win_rate','ret_5pct','ret_95pct']:
+            if pct in df:
+                df[pct] = df[pct].apply(lambda x: f"{100*x:.2f}%" if pd.notnull(x) else "N/A")
+        # Ratios & counts
+        for col in ['sharpe','sortino','profit_factor','expectancy','std_daily']:
+            if col in df:
+                df[col] = df[col].apply(lambda x: f"{x:.2f}" if isinstance(x,(int,float)) else "N/A")
+        df = df.where(pd.notnull(df), "N/A")
+        # Reorder columns
+        cols = ['Instrument','cagr','sharpe','max_drawdown','win_rate',
+                'profit_factor','expectancy','annual_vol','std_daily',
+                'ret_5pct','ret_95pct']
+        df = df[[c for c in cols if c in df.columns]]
+        # Bold highest‐Sharpe
+        if 'sharpe' in df.columns:
+            sharpe_vals = df['sharpe'].str.rstrip('%').astype(float)
+            best = sharpe_vals.idxmax()
+            df.at[best,'Instrument'] = f"**{df.at[best,'Instrument']}**"
 
-    # Embed charts
+        md.append("## 2. Combined Statistics")
+        md.append(df_to_markdown(df, decimals=2))
+        md.append("")
+
+    # --- Section 3: Advanced Portfolio Statistical Tests ---
+    port_tests = os.path.join(run_out, "portfolio", "statistical_tests.csv")
+    if os.path.exists(port_tests):
+        tt = pd.read_csv(port_tests)
+        md.append("## 3. Advanced Portfolio Statistical Tests")
+
+        # 3.1 Actual Metrics
+        row = tt.loc[0]
+        am = pd.DataFrame({
+            'Metric': ['Mean (%)','Log PF','Drawdown (%)','Non-zero Bars'],
+            'Value': [
+                f"{100*row.actual_mean:.2f}%",
+                f"{row.actual_log_pf:.2f}",
+                f"{100*row.actual_drawdown:.2f}%",
+                int(row.num_nonzero_rets)
+            ]
+        })
+        md.append("### 3.1 Actual Metrics")
+        md.append(df_to_markdown(am, decimals=2))
+        md.append("")
+
+        # 3.2 Bootstrap Quantiles (wide, single formatted row)
+        bs = {
+            col.replace('bs_', ''): tt.at[0, col]
+            for col in tt.columns if col.startswith('bs_')
+        }
+        # format bootstrap values
+        formatted_bs = {}
+        for name, val in bs.items():
+            if 'mean' in name or 'dd' in name:
+                formatted_bs[name] = f"{100 * val:.2f}%"
+            else:
+                formatted_bs[name] = f"{val:.2f}"
+        bs_wide = pd.DataFrame([formatted_bs])
+        md.append("### 3.2 Bootstrap Quantiles")
+        md.append(df_to_markdown(bs_wide, decimals=0))
+        md.append("")
+
+        # 3.3 Permutation Drawdown Quantiles & P-Value (wide, single row)
+        perm = {
+            col.replace('perm_dd_', ''): tt.at[0, col]
+            for col in tt.columns if col.startswith('perm_dd_')
+        }
+        perm['p_one_sided_drawdown'] = tt.at[0, 'p_one_sided_drawdown']
+        # format permutation values
+        formatted_perm = {}
+        for name, val in perm.items():
+            if name != 'p_one_sided_drawdown':
+                formatted_perm[name] = f"{100 * val:.2f}%"
+            else:
+                formatted_perm[name] = f"{val:.3f}"
+        perm_wide = pd.DataFrame([formatted_perm])
+        md.append("### 3.3 Permutation Drawdown Quantiles & P-Value")
+        md.append(df_to_markdown(perm_wide, decimals=0))
+        md.append("")
+
+    # --- Section 4: Key Charts ---
+    md.append("## 4. Key Charts")
     for title, fname in [
-        ("OOS Equity Curves", "equity_all_bundles.png"),
-        ("OOS Drawdowns", "drawdown_all_bundles.png"),
-        ("Monthly Return Distribution", "monthly_return_distribution.png"),
-        ("Drawdown Distribution", "drawdown_distribution.png"),
-        ("Drawdown Duration vs Magnitude", "dd_duration_vs_magnitude.png"),
+        ("Equity Curves",           "equity_all_bundles.png"),
+        ("Drawdowns",               "drawdown_all_bundles.png"),
+        ("Portfolio Equity",        "portfolio/portfolio_equity.png"),
+        ("30-Bar Return Dist.",     "portfolio/portfolio_30bar_return_distribution.png"),
+        ("Drawdown Distribution",   "portfolio/drawdown_distribution.png"),
+        ("DD Duration vs Magnitude","portfolio/dd_duration_vs_magnitude.png"),
     ]:
-        if os.path.exists(os.path.join(run_out, fname)):
-            md_lines += [f"## {title}", f"![{title}]({fname})", ""]
+        p = os.path.join(run_out, fname)
+        if os.path.exists(p):
+            md.append(f"### {title}")
+            md.append(f"![{title}]({fname})")
+            md.append("")
 
-    # Portfolio equity
-    pe = os.path.join(run_out, 'portfolio', 'portfolio_equity.png')
-    if os.path.exists(pe):
-        md_lines += ["## Equal-Weight Portfolio Equity", f"![Portfolio Equity](portfolio/portfolio_equity.png)", ""]
-
-    # write the markdown
-    with open(os.path.join(run_out, 'summary.md'), 'w') as f:
-        f.write("\n".join(md_lines))
-    print(f"Generated summary.md → {run_out}/summary.md")
+    # write file
+    out_md = os.path.join(run_out, "summary.md")
+    with open(out_md, "w") as f:
+        f.write("\n\n".join(md))
+    print(f"Generated summary.md → {out_md}")
 
 
 def main():
