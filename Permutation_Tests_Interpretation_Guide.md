@@ -1,3 +1,84 @@
+# APPLIED
+
+## 2. Per-Asset Permutation Tests
+
+| Instrument | Test 1 p | Test 2 p | Trend |   Bias  | Skill |
+| :--------: | :------: | :------: | :---: | :-----: | :---: |
+|    SP500   |   0.807  |   0.001  |  0.0  | –44.15% | –0.00 |
+|     DAX    |   0.806  |   0.001  |  0.0  | 100.88% |  0.00 |
+
+* **Instrument**
+  The ticker or market (plus strategy) being tested.
+
+* **Test 1 p** (OOS Bundle Permutation)
+  You take each out-of-sample bundle’s P\&L for that instrument, randomly shuffle the per-bundle P\&Ls, recombine, and ask: *“How often does a scrambled total ≥ the real total?”*
+
+  * A small p (e.g. 0.05) would indicate the real out-of-sample performance is unlikely to arise by chance.
+  * Here both SP500 (0.807) and DAX (0.806) are high → their raw OOS P\&L sums are well within the distribution of random permutations.
+
+* **Test 2 p** (Training-Process Overfit)
+  You freeze the best hyper-parameters found on the in-sample portion, then permute the in-sample **price** series, re-run the optimization (on that permuted IS), and check “best-bundle” OOS P\&L. The p-value is the fraction of perms whose best OOS P\&L ≥ the original best.
+
+  * A low p (near 0) means your optimization likely overfit—real parameters performed better than almost all random rearrangements of the in-sample data.
+  * Here both series show p ≈ 0.001 → the chosen parameters found real structure that almost never appears in shuffled data.
+
+* **Trend**
+  \= (#long bars − #short bars) × drift\_rate.
+
+  * If your system simply rode a drift or trend in the market, this quantifies that component of return.
+
+* **Bias**
+  The average “illusory” return from overfitting noise: you shuffle **only** the out-of-sample **price changes**, run your backtest each time, compute (r\_perm – trend), then average over B trials.
+
+  * A large positive bias means a lot of the out-of-sample gains are explainable by fitting random noise.
+
+* **Skill**
+  \= original total return – trend – mean\_bias.
+
+  * This is the residual “true alpha” once you strip out drift and overfitting bias.
+  * Here both Skill \~ 0 → almost no genuine signal beyond trend or spurious fitting.
+
+---
+
+## 3. Multiple-System Selection Bias
+
+|    System    | Solo p | Unbiased p |
+| :----------: | :----: | :--------: |
+| SP500\_ewmac |  0.817 |    0.817   |
+|  DAX\_ewmac  |  0.808 |    0.001   |
+
+* **System**
+  Each asset + strategy combination you tested (you had two: SP500\_ewmac and DAX\_ewmac).
+
+* **Solo p**
+  Exactly the same as Test 1 but done separately for each system: *“If I pre-registered this one system, how often would permuted OOS P\&L ≥ the real one?”*
+
+  * SP500\_ewmac → 81.7%
+  * DAX\_ewmac   → 80.8%
+
+* **Unbiased p**
+  Here you simulate your real practice of “run all systems, then pick the best performer.” In each of B permutations you:
+
+  1. Permute the OOS P\&L bundles.
+  2. Recompute each system’s total.
+  3. Identify which system “wins” on that permuted data.
+  4. See if that winner’s permuted total ≥ its actual observed total.
+
+  Counting how often that happens gives the **unbiased** p-value:
+
+  * For SP500\_ewmac it stays 0.817 (because it was the winner even in perm trials).
+  * For DAX\_ewmac it plummets to 0.001—only 0.1% of the time did the best-of-both systems on shuffled data beat its real performance.
+
+
+### Why both p-values matter
+
+* **Solo p** is the right test if you truly locked in your system *before* seeing any data.
+* **Unbiased p** corrects for the fact that you compared multiple candidates and then reported the top one—so it answers:
+  *“What are the odds that my best-in-class system would look this good purely by luck?”*
+
+---
+
+# GENERAL 
 ## Test 1: Fully Specified Trading System
 
 **Metric:** p-value from permuting OOS price changes.
