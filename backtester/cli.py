@@ -4,6 +4,7 @@ import json
 import logging
 import os
 from datetime import datetime
+from importlib import import_module
 
 import numpy as np
 import pandas as pd
@@ -15,6 +16,12 @@ from backtester.data_loader import DataLoader
 from backtester.backtest import run_backtest, generate_splits
 from backtester.pnl_engine import simulate_pnl
 from backtester.utils import compute_statistics, statistical_tests
+from backtester.stat_tests import (
+    test1_permutation_oos,
+    test2_permutation_training,
+    permutation_test_multiple,
+    partition_return
+)
 
 
 def get_portfolio_weights(instruments, portfolio_cfg):
@@ -138,100 +145,88 @@ def df_to_markdown(df: pd.DataFrame, decimals: int = 2) -> str:
     return "\n".join([header, sep] + rows)
 
 
-def generate_summary_md(run_out: str, cfg: dict):
+def generate_summary_md(run_out: str, cfg: dict, portfolio_cfg, save_per_asset, instruments):
     md = []
     md.append(f"# Backtest Summary: `{os.path.basename(run_out)}`")
     md.append(f"**Run date:** {datetime.now():%Y-%m-%d %H:%M}")
     md.append(f"**Strategy:** `{cfg['strategy']['module']}.{cfg['strategy']['function']}`")
     md.append("")
 
-    # --- Section 2: Combined Statistics ---
+    # --- 1. Combined Statistics ---
     combined_csv = os.path.join(run_out, "combined_stats.csv")
     if os.path.exists(combined_csv):
         df = (pd.read_csv(combined_csv, index_col=0)
-                .reset_index()
-                .rename(columns={'index':'Instrument'}))
-        # Format percentages
-        for pct in ['cagr','annual_vol','max_drawdown','avg_drawdown','win_rate','ret_5pct','ret_95pct']:
-            if pct in df:
-                df[pct] = df[pct].apply(lambda x: f"{100*x:.2f}%" if pd.notnull(x) else "N/A")
-        # Ratios & counts
-        for col in ['sharpe','sortino','profit_factor','expectancy','std_daily']:
-            if col in df:
-                df[col] = df[col].apply(lambda x: f"{x:.2f}" if isinstance(x,(int,float)) else "N/A")
-        df = df.where(pd.notnull(df), "N/A")
-        # Reorder columns
-        cols = ['Instrument','cagr','sharpe','max_drawdown','win_rate',
-                'profit_factor','expectancy','annual_vol','std_daily',
-                'ret_5pct','ret_95pct']
-        df = df[[c for c in cols if c in df.columns]]
-        # Bold highest‐Sharpe
-        if 'sharpe' in df.columns:
-            sharpe_vals = df['sharpe'].str.rstrip('%').astype(float)
-            best = sharpe_vals.idxmax()
-            df.at[best,'Instrument'] = f"**{df.at[best,'Instrument']}**"
-
-        md.append("## 2. Combined Statistics")
+                .rename_axis("Instrument")
+                .reset_index())
+        # Reorder so Portfolio is last
+        df = pd.concat([
+            df[df["Instrument"] != "Portfolio"],
+            df[df["Instrument"] == "Portfolio"]
+        ], ignore_index=True)
+        # Rename percentiles
+        df = df.rename(columns={"ret_5pct":"5th pctile","ret_95pct":"95th pctile"})
+        # Format columns
+        pct_cols = ["cagr","annual_vol","max_drawdown","avg_drawdown","win_rate","5th pctile","95th pctile"]
+        for c in pct_cols:
+            if c in df:
+                df[c] = df[c].apply(lambda x: f"{100*x:.1f}%" if pd.notnull(x) else "N/A")
+        num_cols = ["sharpe","sortino","profit_factor","expectancy","std_daily"]
+        for c in num_cols:
+            if c in df:
+                df[c] = df[c].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else "N/A")
+        # Bold best Sharpe
+        if "sharpe" in df:
+            best = df[df.Instrument!="Portfolio"]["sharpe"].astype(float).idxmax()
+            df.loc[best,"Instrument"] = f"**{df.loc[best,'Instrument']}**"
+        md.append("## 1. Combined Statistics")
         md.append(df_to_markdown(df, decimals=2))
         md.append("")
 
-    # --- Section 3: Advanced Portfolio Statistical Tests ---
-    port_tests = os.path.join(run_out, "portfolio", "statistical_tests.csv")
-    if os.path.exists(port_tests):
-        tt = pd.read_csv(port_tests)
-        md.append("## 3. Advanced Portfolio Statistical Tests")
+    # --- 2. Per-Asset Permutation Tests (consolidated table) -------------
+    rows = []
+    for inst in instruments:
+        sym    = inst["symbol"]
+        folder = save_per_asset and os.path.join(run_out, sym) or run_out
 
-        # 3.1 Actual Metrics
-        row = tt.loc[0]
-        am = pd.DataFrame({
-            'Metric': ['Mean (%)','Log PF','Drawdown (%)','Non-zero Bars'],
-            'Value': [
-                f"{100*row.actual_mean:.2f}%",
-                f"{row.actual_log_pf:.2f}",
-                f"{100*row.actual_drawdown:.2f}%",
-                int(row.num_nonzero_rets)
-            ]
+        # load each test result (or N/A if missing)
+        p1 = pd.read_csv(os.path.join(folder, "permutation_test_oos.csv")).iloc[0,0] \
+             if os.path.exists(os.path.join(folder, "permutation_test_oos.csv")) else None
+        p2 = pd.read_csv(os.path.join(folder, "permutation_test_training.csv")).iloc[0,0] \
+             if os.path.exists(os.path.join(folder, "permutation_test_training.csv")) else None
+        pr = pd.read_csv(os.path.join(folder, "partition_return.csv")) if os.path.exists(os.path.join(folder, "partition_return.csv")) else None
+
+        trend     = pr["trend"].iloc[0]    if pr is not None else None
+        bias      = pr["mean_bias"].iloc[0] if pr is not None else None
+        skill     = pr["skill"].iloc[0]    if pr is not None else None
+
+        rows.append({
+            "Instrument":   sym,
+            "Test 1 p":     f"{p1:.3f}" if p1 is not None else "N/A",
+            "Test 2 p":     f"{p2:.3f}" if p2 is not None else "N/A",
+            "Trend":        f"{trend:.1f}" if trend is not None else "N/A",
+            "Bias":         f"{100*bias:.2f}%" if bias is not None else "N/A",
+            "Skill":        f"{skill:.2f}"   if skill is not None else "N/A",
         })
-        md.append("### 3.1 Actual Metrics")
-        md.append(df_to_markdown(am, decimals=2))
+
+    df_tests = pd.DataFrame(rows).set_index("Instrument")
+    md.append("## 2. Per-Asset Permutation Tests")
+    md.append(df_to_markdown(df_tests.reset_index(), decimals=0))
+    md.append("")
+
+    # --- 3. Multiple-System Selection Bias ---
+    p5 = os.path.join(run_out, "permutation_test_multiple.csv")
+    if os.path.exists(p5):
+        df5 = pd.read_csv(p5, index_col=0)
+        df5.index.name = "System"
+        df5 = df5.rename(columns={"solo_p":"Solo p","unbiased_p":"Unbiased p"})
+        # Format
+        for c in ["Solo p","Unbiased p"]:
+            df5[c] = df5[c].apply(lambda x: f"{x:.3f}")
+        md.append("## 3. Multiple-System Selection Bias")
+        md.append(df_to_markdown(df5.reset_index(), decimals=3))
         md.append("")
 
-        # 3.2 Bootstrap Quantiles (wide, single formatted row)
-        bs = {
-            col.replace('bs_', ''): tt.at[0, col]
-            for col in tt.columns if col.startswith('bs_')
-        }
-        # format bootstrap values
-        formatted_bs = {}
-        for name, val in bs.items():
-            if 'mean' in name or 'dd' in name:
-                formatted_bs[name] = f"{100 * val:.2f}%"
-            else:
-                formatted_bs[name] = f"{val:.2f}"
-        bs_wide = pd.DataFrame([formatted_bs])
-        md.append("### 3.2 Bootstrap Quantiles")
-        md.append(df_to_markdown(bs_wide, decimals=0))
-        md.append("")
-
-        # 3.3 Permutation Drawdown Quantiles & P-Value (wide, single row)
-        perm = {
-            col.replace('perm_dd_', ''): tt.at[0, col]
-            for col in tt.columns if col.startswith('perm_dd_')
-        }
-        perm['p_one_sided_drawdown'] = tt.at[0, 'p_one_sided_drawdown']
-        # format permutation values
-        formatted_perm = {}
-        for name, val in perm.items():
-            if name != 'p_one_sided_drawdown':
-                formatted_perm[name] = f"{100 * val:.2f}%"
-            else:
-                formatted_perm[name] = f"{val:.3f}"
-        perm_wide = pd.DataFrame([formatted_perm])
-        md.append("### 3.3 Permutation Drawdown Quantiles & P-Value")
-        md.append(df_to_markdown(perm_wide, decimals=0))
-        md.append("")
-
-    # --- Section 4: Key Charts ---
+    # --- 4. Key Charts ---
     md.append("## 4. Key Charts")
     for title, fname in [
         ("Equity Curves",           "equity_all_bundles.png"),
@@ -241,8 +236,8 @@ def generate_summary_md(run_out: str, cfg: dict):
         ("Drawdown Distribution",   "portfolio/drawdown_distribution.png"),
         ("DD Duration vs Magnitude","portfolio/dd_duration_vs_magnitude.png"),
     ]:
-        p = os.path.join(run_out, fname)
-        if os.path.exists(p):
+        path = os.path.join(run_out, fname)
+        if os.path.exists(path):
             md.append(f"### {title}")
             md.append(f"![{title}]({fname})")
             md.append("")
@@ -252,6 +247,7 @@ def generate_summary_md(run_out: str, cfg: dict):
     with open(out_md, "w") as f:
         f.write("\n\n".join(md))
     print(f"Generated summary.md → {out_md}")
+
 
 
 def main():
@@ -514,17 +510,99 @@ def main():
     #   - dd_duration_vs_magnitude.png
     compute_statistics(df_port, out_port)
 
-    # 5e) Ask whether to run permutation & bootstrap tests for the portfolio
-    resp = input("Run permutation & bootstrap tests for Portfolio? [y/N]: ").strip().lower()
-    if resp.startswith('y'):
-        statistical_tests(
-            df_port, out_port,
-            bootstrap_reps   = cfg.get('tests', {}).get('bootstrap_reps', 1000),
-            permutation_reps= cfg.get('tests', {}).get('permutation_reps', 1000)
-        )
-    else:
-        print("Skipping tests for Portfolio.")
+    # 5e) Book-style permutation tests
 
+    # Safely fetch tests configuration (avoids KeyError if 'tests' is missing)
+    # Use the portfolio diagnostics DataFrame as our series
+    # price_data = df_port.set_index('date').copy()
+    # price_data['price_change'] = price_data['equity'].pct_change().fillna(0)
+
+    # Build a map of system‐name → its output folder
+    # --- 4e) Book-Style Permutation Tests with confirmations ----------------
+
+    inst_folders = {}
+    for inst in instruments:
+        name = f"{inst['symbol']}_{inst['strategy']['module']}"
+        folder = save_per_asset and os.path.join(run_out, inst['symbol']) or run_out
+        inst_folders[name] = folder
+    perms = cfg.get('tests', {}).get('permutations', 1000)
+
+    # Test 1: OOS bundle permutation (per-asset)
+    if input("Run Test 1 (OOS bundle permutation) for each asset? [y/N]: ").strip().lower().startswith('y'):
+        for inst in instruments:
+            folder = save_per_asset and os.path.join(run_out, inst['symbol']) or run_out
+            p1 = test1_permutation_oos(folder, B=perms)
+            pd.DataFrame({'oos_bundle_p': [p1]}) \
+                .to_csv(os.path.join(folder, 'permutation_test_oos.csv'), index=False)
+            print(f"  ✔ {inst['symbol']}: Test 1 complete (p={p1:.3f})")
+
+    # Test 2: Training-process overfit (per-asset)
+    if input("Run Test 2 (training-process overfit) for each asset? [y/N]: ").strip().lower().startswith('y'):
+        for inst in instruments:
+            folder = save_per_asset and os.path.join(run_out, inst['symbol']) or run_out
+            p2 = test2_permutation_training(inst_cfg, folder, B=perms)
+            pd.DataFrame({'training_overfit_p': [p2]}) \
+                .to_csv(os.path.join(folder, 'permutation_test_training.csv'), index=False)
+            print(f"  ✔ {inst['symbol']}: Test 2 complete (p={p2:.3f})")
+
+    # Test 5: Multiple-system selection bias (portfolio-wide)
+    if input("Run Test 5 (multiple-system selection bias)? [y/N]: ").strip().lower().startswith('y'):
+        df5 = permutation_test_multiple(inst_folders, B=perms)
+        df5.to_csv(os.path.join(run_out, 'permutation_test_multiple.csv'))
+        print(f"  ✔ Test 5 complete (saved permutation_test_multiple.csv)")
+
+    # Test 6: Partition return (per-asset)
+    if input("Run Test 6 (partition return) for each asset? [y/N]: ").strip().lower().startswith('y'):
+        drift = cfg.get('tests', {}).get('drift_rate', 0.0)
+        for inst, w in zip(instruments, weights):
+            folder = save_per_asset and os.path.join(run_out, inst['symbol']) or run_out
+
+            # load price series
+            dl_inst = DataLoader(
+                data_dir=inst_cfg['data']['path'],
+                symbol=inst['symbol'],
+                timeframe=inst_cfg['data']['timeframe'],
+                base_timeframe=inst_cfg['data'].get('base_timeframe')
+            )
+            df_price = dl_inst.load()
+            df_price['price_change'] = df_price['close'].pct_change().fillna(0)
+
+            # load results and detect pnl column
+            res = pd.read_csv(os.path.join(folder, 'results.csv'))
+            pnl_cols = [c for c in res.columns if c.lower().endswith('_pnl')]
+            pnl_col = pnl_cols[0]
+            best_row = res.loc[res[pnl_col].idxmax()]
+            params = {k: best_row[k] for k in res.columns if k not in ('bundle',) and not k.startswith('oos_')}
+            if 'vol_window' in params: params['vol_window'] = int(params['vol_window'])
+
+            # get positions
+            strat_mod = import_module(f"backtester.strategies.{inst['strategy']['module']}")
+            strat_fn = getattr(strat_mod, inst['strategy']['function'])
+            df_price['position'] = strat_fn(df_price, **params)['position'].values
+
+            # build instance backtest fn
+            inst_cap = total_capital * w
+            fee_row = fees_map[inst['symbol']]
+
+            def inst_backtest(df):
+                pnl = simulate_pnl(
+                    positions=df['position'],
+                    price=df['close'],
+                    multiplier=params['multiplier'],
+                    fx=params['fx'],
+                    capital=inst_cap,
+                    commission_usd=fee_row['commission_usd'],
+                    commission_pct=fee_row['commission_pct'],
+                    slippage_pct=fee_row['slippage_pct'],
+                )
+                eq = (1 + pnl['pnl'] / inst_cap).cumprod() * inst_cap
+                return eq.iloc[-1] / eq.iloc[0] - 1
+
+            # run partition_return
+            pr = partition_return(inst_backtest, df_price, drift_rate=drift, oos_start=0, B=perms)
+            pd.DataFrame([pr]).to_csv(os.path.join(folder, 'partition_return.csv'), index=False)
+            print(
+                f"  ✔ {inst['symbol']}: Test 6 complete (trend={pr['trend']:.1f}, bias={100 * pr['mean_bias']:.2f}%, skill={pr['skill']:.2f})")
 
     # 6) Append Portfolio row to combined_stats.csv with proper stats ----------
     # compute drawdowns & durations
@@ -591,7 +669,7 @@ def main():
     print(f"✅ combined_stats.csv created → {run_out}/combined_stats.csv")
 
     # 7) Generate final summary.md
-    generate_summary_md(run_out, cfg)
+    generate_summary_md(run_out, cfg, portfolio_cfg, save_per_asset, instruments)
 
 
 if __name__ == '__main__':
