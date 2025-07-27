@@ -248,7 +248,6 @@ def generate_summary_md(run_out: str, cfg: dict, portfolio_cfg, save_per_asset, 
     print(f"Generated summary.md → {out_md}")
 
 
-
 def main():
     args = parse_args()
     logging.basicConfig(level=getattr(logging, args.log))
