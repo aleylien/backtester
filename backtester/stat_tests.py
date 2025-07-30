@@ -67,8 +67,8 @@ def test1_permutation_oos(inst_cfg: dict, inst_folder: str, B: int = 1000) -> fl
                 continue  # skip if no such bundle
             price_series = oos_groups[i][price_col].values
             perm_prices = np.random.permutation(price_series)
-            # Create a DataFrame for the permuted price series
-            df_perm = pd.DataFrame({price_col: perm_prices}, index=range(len(perm_prices)))
+            # Build a permuted series under the name 'close' so strategy can find it
+            df_perm = pd.DataFrame({'close': perm_prices})
             # Run strategy on permuted price
             pos_df = strat_fn(df_perm, **params)
             # Simulate PnL for this OOS segment
