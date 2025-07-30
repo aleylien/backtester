@@ -183,12 +183,18 @@ def compute_statistics(combined: pd.DataFrame, run_out: str) -> dict:
 
     std_dev_a    = all_rets.std()
 
+    avg_win_a = all_rets[all_rets > 0].mean()
+    avg_loss_a = all_rets[all_rets < 0].mean()  # This will be a negative number
+    max_loss_bar_a = all_rets.min()  # most negative return
+
+    # Print them (for console output)
     print(
         f"Aggregate: CAGR={cagr_a:.2%}, Vol={ann_vol_a:.2%}, Sharpe={sharpe_a:.2f}, "
         f"Sortino={sortino_a:.2f}, MaxDD={max_dd_a:.2%}, AvgDD={avg_dd_a:.2%}, "
         f"AvgDDdur={avg_dd_dur_a:.1f}, PF={pf_a:.2f}, Exp={expectancy_a:.2f}, "
         f"WR={win_rate_a:.1%}, Std={std_dev_a:.4f}, "
-        f"5%={tail_5_a:.2%}, 95%={tail_95_a:.2%}"
+        f"5%={tail_5_a:.2%}, 95%={tail_95_a:.2%}, "
+        f"AvgWin={avg_win_a:.2%}, AvgLoss={avg_loss_a:.2%}, MaxLoss={max_loss_bar_a:.2%}"
     )
 
     # --- Save aggregate stats to CSV (all metrics!) ---
@@ -199,13 +205,16 @@ def compute_statistics(combined: pd.DataFrame, run_out: str) -> dict:
         'sortino':        sortino_a,
         'max_drawdown':   max_dd_a,
         'avg_drawdown':   avg_dd_a,
-        'avg_dd_duration':avg_dd_dur_a,
-        'pf':             pf_a,
+        'avg_dd_duration': avg_dd_dur_a,
+        'profit_factor':  pf_a,
         'expectancy':     expectancy_a,
         'win_rate':       win_rate_a,
         'std_daily':      std_dev_a,
         'ret_5pct':       tail_5_a,
         'ret_95pct':      tail_95_a,
+        'avg_win':        avg_win_a if not np.isnan(avg_win_a) else 0.0,
+        'avg_loss':       avg_loss_a if not np.isnan(avg_loss_a) else 0.0,
+        'max_loss_pct':   max_loss_bar_a if not np.isnan(max_loss_bar_a) else 0.0
     }
     pd.DataFrame([agg_stats]).to_csv(
         os.path.join(run_out, "strategy_statistics.csv"), index=False

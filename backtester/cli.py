@@ -151,6 +151,13 @@ def generate_summary_md(run_out: str, cfg: dict, portfolio_cfg, save_per_asset, 
     md.append(f"**Strategy:** `{cfg['strategy']['module']}.{cfg['strategy']['function']}`")
     md.append("")
 
+    md.append("**Contents:**")
+    md.append("- [1. Combined Statistics](#1-combined-statistics)")
+    md.append("- [2. Per-Asset Permutation Tests](#2-per-asset-permutation-tests)")
+    md.append("- [3. Multiple-System Selection Bias](#3-multiple-system-selection-bias)")
+    md.append("- [4. Key Charts](#4-key-charts)")
+    md.append("")
+
     # --- 1. Combined Statistics ---
     combined_csv = os.path.join(run_out, "combined_stats.csv")
     if os.path.exists(combined_csv):
@@ -165,7 +172,8 @@ def generate_summary_md(run_out: str, cfg: dict, portfolio_cfg, save_per_asset, 
         # Rename percentiles
         df = df.rename(columns={"ret_5pct":"5th pctile","ret_95pct":"95th pctile"})
         # Format columns
-        pct_cols = ["cagr","annual_vol","max_drawdown","avg_drawdown","win_rate","5th pctile","95th pctile"]
+        pct_cols = ["cagr", "annual_vol", "max_drawdown", "avg_drawdown", "win_rate", "5th pctile", "95th pctile",
+                    "avg_win", "avg_loss", "max_loss_pct"]
         for c in pct_cols:
             if c in df:
                 df[c] = df[c].apply(lambda x: f"{100*x:.1f}%" if pd.notnull(x) else "N/A")
@@ -293,38 +301,18 @@ def main():
     # --- 2) Compute portfolio weights & total capital ------------------------
     weights, total_capital = get_portfolio_weights(instruments, portfolio_cfg)
 
-    inst_stats      = {}
+    # --- 3) Per-instrument backtests ---
+    inst_stats = {}
     per_inst_results = []
-
-    # --- 3) Per‐instrument backtests ------------------------------------------
     for inst, w in zip(instruments, weights):
-        symbol = inst['symbol']
-        print(f"\n=== Running backtest for {symbol} (weight {w:.2%}) ===")
 
-        # fees for this symbol
+        # САМ ДОБАВИЛ ЭТО:
         fee_row = fees_map[symbol]
         comm_usd, comm_pct, slip_pct = (
             fee_row['commission_usd'],
             fee_row['commission_pct'],
             fee_row['slippage_pct'],
         )
-
-        # prepare a copy of cfg for this instrument
-        inst_cfg = deepcopy(cfg)
-        inst_cfg['data']['symbol']             = symbol
-        inst_cfg['fees']['mapping']            = inst['fees_mapping']
-        inst_cfg['strategy']                   = inst['strategy']
-        inst_cfg['optimization']['param_grid'] = inst['param_grid']
-
-        # allocate the capital slice
-        inst_capital = total_capital * w
-        inst_cfg['optimization']['param_grid']['capital'] = [inst_capital]
-
-        # create per‐asset folder if needed
-        out_sub = os.path.join(run_out, symbol) if save_per_asset else run_out
-        os.makedirs(out_sub, exist_ok=True)
-
-        # load data
         dl_inst = DataLoader(
             data_dir       = inst_cfg['data']['path'],
             symbol         = symbol,
@@ -332,122 +320,301 @@ def main():
             base_timeframe = inst_cfg['data'].get('base_timeframe')
         )
         df_inst = dl_inst.load()
-        start, end = inst_cfg['data'].get('start'), inst_cfg['data'].get('end')
-        if start or end:
-            df_inst = df_inst.loc[
-                (start or df_inst.index[0]) : (end or df_inst.index[-1])
-            ]
-        logging.info(f"{symbol}: {len(df_inst):,} bars loaded")
 
-        # run the walk‐forward backtest
+        inst_cfg = deepcopy(cfg)
+        inst_cfg['data']['symbol']             = symbol
+        inst_cfg['fees']['mapping']            = inst['fees_mapping']
+        inst_cfg['strategy']                   = inst['strategy']
+        inst_cfg['optimization']['param_grid'] = inst['param_grid']
+
+        out_sub = os.path.join(run_out, symbol) if save_per_asset else run_out
+        os.makedirs(out_sub, exist_ok=True)
+
+
+        symbol = inst['symbol']
+        logging.info(f"\n=== Running backtest for {symbol} (weight {w:.2%}) ===")
+        # ... (loading data and optimizing per bundle) ...
         results_inst = run_backtest(df_inst, inst_cfg)
         results_inst.to_csv(os.path.join(out_sub, 'results.csv'), index=False)
-
-        # collect OOS diagnostics
+        # Collect OOS diagnostics (positions and forecasts)
         splits_inst = list(generate_splits(df_inst, inst_cfg['optimization']['bundles']))
         diags = []
         strat_mod = import_module(f"backtester.strategies.{inst_cfg['strategy']['module']}")
-        strat_fn  = getattr(strat_mod, inst_cfg['strategy']['function'])
-        for (_, row), (_, test_df) in zip(results_inst.iterrows(), splits_inst):
-            params = {
-                k: row[k]
-                for k in results_inst.columns
-                if k not in ('bundle',) and not k.startswith('oos_') and not k.startswith('_')
-            }
+        strat_fn = getattr(strat_mod, inst_cfg['strategy']['function'])
+        for (idx, row), (_, test_df) in zip(results_inst.iterrows(), splits_inst):
+            params = {k: row[k] for k in results_inst.columns
+                      if k not in ('bundle',) and not k.startswith('oos_') and not k.startswith('_')}
+            # Ensure any float params that should be int (like vol_window) are cast
             if 'vol_window' in params:
                 params['vol_window'] = int(params['vol_window'])
-
+            # Run strategy on OOS data with optimal params
             pos_df = strat_fn(test_df, **params)
-            pnl_df = simulate_pnl(
-                positions      = pos_df['position'],
-                price          = test_df['close'],
-                multiplier     = params['multiplier'],
-                fx             = params['fx'],
-                capital        = inst_capital,
-                commission_usd = comm_usd,
-                commission_pct = comm_pct,
-                slippage_pct   = slip_pct,
-            )
-
-            diags.append(
-                pos_df.join(pnl_df, how='left', rsuffix='_pnl')
-                      .assign(bundle=row['bundle'], sample='OOS')
-            )
-
-        combined_inst = pd.concat(diags).reset_index()
+            # We do NOT simulate PnL here yet if using find-signal mode; just collect position/forecast
+            # But for standard mode, simulate PnL as before
+            if portfolio_cfg.get('max_open_trades'):
+                # For find-signal mode, just mark sample and bundle
+                diag = pos_df.copy()
+                diag['bundle'] = row['bundle']
+                diag['sample'] = 'OOS'
+            else:
+                pnl_df = simulate_pnl(
+                    positions=pos_df['position'],
+                    price=test_df['close'],
+                    multiplier=params.get('multiplier', 1.0),
+                    fx=params.get('fx', 1.0),
+                    capital=params.get('capital', 100_000),
+                    commission_usd=comm_usd,
+                    commission_pct=comm_pct,
+                    slippage_pct=slip_pct,
+                )
+                diag = pos_df.join(pnl_df, how='left')
+                diag['bundle'] = row['bundle']; diag['sample'] = 'OOS'
+            diags.append(diag.reset_index())
+        combined_inst = pd.concat(diags, ignore_index=True)
         combined_inst.to_csv(os.path.join(out_sub, 'details_all_bundles.csv'), index=False)
         print(f"{symbol}: details_all_bundles.csv saved")
-
-        # plot OOS equity & drawdown
-        oos = combined_inst[combined_inst['sample'] == 'OOS']
-        for col, title, fname in [
-            ('equity',   f"{symbol} OOS Equity Curves", 'equity_all_bundles.png'),
-            ('drawdown', f"{symbol} OOS Drawdowns",      'drawdown_all_bundles.png')
-        ]:
-            fig, ax = plt.subplots()
-            for b, grp in oos.groupby('bundle'):
-                series = grp[col]
-                if col == 'equity':
-                    series = series / series.iloc[0]
-                ax.plot(np.arange(len(series)), series.values, label=f"B{b}")
-            ax.set_title(title)
-            ax.set_xlabel("Bar # since OOS start")
-            ax.set_ylabel(col.capitalize())
-            ax.legend(fontsize='small', ncol=2)
-            fig.savefig(os.path.join(out_sub, fname), bbox_inches='tight')
-            plt.close(fig)
-
-        # compute per‐asset stats and save
-        stats = compute_statistics(combined_inst, out_sub)
-        inst_stats[symbol] = stats
-
-        # collect for portfolio aggregation
+        # If not using find-signal mode, compute stats for this instrument
+        if not portfolio_cfg.get('max_open_trades'):
+            stats = compute_statistics(combined_inst, out_sub)
+            inst_stats[symbol] = stats
         per_inst_results.append(combined_inst)
 
-        # optional advanced tests
-        # resp = input(f"Run permutation & bootstrap tests for {symbol}? [y/N]: ").strip().lower()
-        # if resp.startswith('y'):
-        #     statistical_tests(
-        #         combined_inst, out_sub,
-        #         bootstrap_reps  = cfg.get('tests', {}).get('bootstrap_reps', 1000),
-        #         permutation_reps= cfg.get('tests', {}).get('permutation_reps', 1000)
-        #     )
-        # else:
-        #     print(f"Skipping tests for {symbol}.")
-
-    # --- 4) PORTFOLIO AGGREGATION via weighted returns -----------------------
-    # build per-asset return series
-    rets_list = []
-    symbols   = [inst['symbol'] for inst in instruments]
-    for sym, df_inst in zip(symbols, per_inst_results):
-        df_inst = df_inst.set_index('date')
-        r = df_inst['equity'].pct_change().fillna(0).rename(sym)
-        rets_list.append(r)
-    rets_df = pd.concat(rets_list, axis=1).fillna(0)
-
-    # construct weight vector
-    w_map = portfolio_cfg.get('weights', {})
-    w_vec = np.array([w_map.get(sym, 1.0/len(symbols)) for sym in symbols])
-    w_vec /= w_vec.sum()
-
-    # portfolio returns & equity
-    port_rets  = rets_df.dot(w_vec)
-    port_equity= (1 + port_rets).cumprod() * total_capital
-
-    # save portfolio equity curve
-    out_port = os.path.join(run_out, 'portfolio')
-    os.makedirs(out_port, exist_ok=True)
-    pd.DataFrame({'equity': port_equity}, index=port_equity.index) \
-      .to_csv(os.path.join(out_port, 'portfolio_equity.csv'),
-              index_label='date')
-    fig, ax = plt.subplots()
-    ax.plot(port_equity.index, port_equity.values)
-    ax.set_title("Portfolio Equity")
-    ax.set_ylabel("Equity")
-    ax.set_xlabel("Date")
-    fig.savefig(os.path.join(out_port, 'portfolio_equity.png'), bbox_inches='tight')
-    plt.close(fig)
-    print("Portfolio equity saved")
+    # --- 4) Portfolio aggregation ---
+    if portfolio_cfg.get('max_open_trades'):
+        # Find-Signal Mode: aggregate signals from all instruments
+        max_trades = portfolio_cfg['max_open_trades']
+        # Prepare a unified date index (all dates where any instrument had OOS data)
+        all_dates = sorted({d for df in per_inst_results for d in df['date']})
+        # Create a DataFrame for combined positions, initially zeros
+        symbols = [inst['symbol'] + "_" + inst['strategy']['module'] for inst in instruments]
+        port_positions = pd.DataFrame(0.0, index=pd.to_datetime(all_dates), columns=symbols)
+        port_prices = {}
+        port_forecasts = {}
+        # Build a dictionary of forecast series for ranking signals
+        for sym, df_inst in zip(symbols, per_inst_results):
+            df_inst['date'] = pd.to_datetime(df_inst['date'])
+            df_inst.set_index('date', inplace=True)
+            # Ensure the DataFrame has forecast column; if not present, derive from position sign
+            if 'capped_forecast' in df_inst:
+                forecast_series = df_inst['capped_forecast'].copy()
+            elif 'raw_forecast' in df_inst:
+                forecast_series = df_inst['raw_forecast'].copy()
+            else:
+                # If strategy doesn't output forecast, use position as proxy (entry/exit signals)
+                forecast_series = df_inst['position'].astype(float).copy()
+            # Price series for PnL calculations
+            price_series = df_inst['price']
+            # Reindex forecast and price to all_dates, forward-fill to carry last value through closed days, and fill NaN with 0 for forecast
+            forecast_series = forecast_series.reindex(port_positions.index).ffill().fillna(0.0)
+            price_series = price_series.reindex(port_positions.index).ffill()
+            port_forecasts[sym] = forecast_series
+            port_prices[sym] = price_series
+        # Now iterate over each day to simulate trades
+        open_trades = set()  # currently open trades (by symbol)
+        pending_entry = {}  # pending flip entries to open next day
+        # Determine contract size for a trade (function of capital, price on entry)
+        total_capital = portfolio_cfg.get('capital', total_capital)  # ensure we have total_capital
+        for current_date in port_positions.index:
+            # 1. Process exits
+            exits_today = []
+            for sym in list(open_trades):
+                # If forecast sign became 0 or flipped, we close the trade
+                if np.sign(port_forecasts[sym].loc[current_date]) == 0:
+                    exits_today.append(sym)
+                elif np.sign(port_forecasts[sym].loc[current_date]) * np.sign(
+                        port_forecasts[sym].shift(1).loc[current_date]) == -1:
+                    # forecast sign flip: close now, and mark for re-entry
+                    exits_today.append(sym)
+                    pending_entry[sym] = np.sign(port_forecasts[sym].loc[current_date])
+            for sym in exits_today:
+                open_trades.discard(sym)
+                pending_entry.pop(sym,
+                                  None)  # if a pending entry was set for a flip, removing it because we'll handle fresh
+                # Set position to 0 from this day onward (closing position)
+                port_positions.loc[current_date:, sym] = 0.0
+            # 2. Process new entries
+            # Gather entry signals for symbols that are not currently open
+            entry_signals = []
+            for sym in symbols:
+                if sym in open_trades:
+                    continue  # skip already open
+                # Determine if a new entry should occur:
+                prev_sign = np.sign(port_forecasts[sym].shift(1).loc[current_date])
+                curr_sign = np.sign(port_forecasts[sym].loc[current_date])
+                if prev_sign == 0 and curr_sign != 0:
+                    entry_signals.append((sym, abs(port_forecasts[sym].loc[current_date]), int(np.sign(curr_sign))))
+                # Handle pending entries from previous flip (sign didn't go through zero)
+                if sym in pending_entry:
+                    # If the current forecast still supports the pending direction
+                    pend_dir = pending_entry[sym]
+                    if np.sign(port_forecasts[sym].loc[current_date]) == pend_dir:
+                        entry_signals.append((sym, abs(port_forecasts[sym].loc[current_date]), int(pend_dir)))
+                    # Remove pending flag regardless (we either use it now or drop it if signal changed)
+                    pending_entry.pop(sym, None)
+            # If there are more signals than available slots, sort by strength and cut off
+            available_slots = max_trades - len(open_trades)
+            if available_slots > 0 and entry_signals:
+                entry_signals.sort(key=lambda x: x[1], reverse=True)
+                chosen_signals = entry_signals[:available_slots]
+            else:
+                chosen_signals = []
+            for sym, strength, direction in chosen_signals:
+                # Open trade for sym
+                open_trades.add(sym)
+                # Determine position size (contracts) based on fraction of capital
+                # fraction = 1/max_trades (equal allocation per allowed trade)
+                trade_fraction = 1.0 / max_trades
+                entry_price = port_prices[sym].loc[current_date]
+                if np.isnan(entry_price) or entry_price == 0:
+                    # If price data missing or zero (should not happen), skip
+                    continue
+                # Position contracts = (fraction * total_capital) / (price * multiplier * fx)
+                # Retrieve multiplier and fx for this instrument from its config or results (assuming constant across bundles)
+                fx = 1.0;
+                mult = 1.0
+                # We stored param grid in inst_cfg; get those if available (fallback to 1.0)
+                for inst in instruments:
+                    sym_key = inst['symbol'] + "_" + inst['strategy']['module']
+                    if sym_key == sym:
+                        mult = inst['strategy'].get('multiplier', 1.0) if 'multiplier' in inst[
+                            'strategy'] else params.get('multiplier', 1.0)
+                        fx = inst['strategy'].get('fx', 1.0) if 'fx' in inst['strategy'] else params.get('fx', 1.0)
+                        break
+                position_size = trade_fraction * total_capital / (entry_price * mult * fx)
+                # Use sign for direction, and round to nearest whole contract
+                position_size = int(round(position_size)) * direction
+                # Assign this position from today onward until closed
+                port_positions.loc[current_date:, sym] = position_size
+        # After iterating all days, ensure any open trades are closed at the end for final equity calc
+        if open_trades:
+            last_day = port_positions.index[-1]
+            for sym in list(open_trades):
+                open_trades.remove(sym)
+                port_positions.loc[last_day:,
+                sym] = 0.0  # close at last day (effectively same as valuing at last price)
+        # Calculate portfolio PnL and equity by summing PnL of all positions
+        port_equity = pd.Series(0.0, index=port_positions.index)
+        port_equity.iloc[0] = total_capital
+        # We will accumulate equity manually: equity[t] = equity[t-1] + sum_i(Δprice_i[t] * prev_position_i * multiplier_i * fx_i)
+        prev_prices = {sym: port_prices[sym].iloc[0] for sym in symbols}
+        prev_equity = total_capital
+        portfolio_pnl = []  # to store daily pnl for distribution
+        for t in range(1, len(port_positions.index)):
+            date = port_positions.index[t]
+            daily_pnl = 0.0
+            for sym in symbols:
+                prev_pos = port_positions.iloc[t - 1][sym]
+                if prev_pos != 0:
+                    # Price change from prev day to current day
+                    price_change = port_prices[sym].iloc[t] - prev_prices[sym]
+                    # Use multiplier and fx for this asset
+                    # (We fetch these similar to above; ideally store in a dict for efficiency)
+                    fx = 1.0;
+                    mult = 1.0
+                    for inst in instruments:
+                        if sym == inst['symbol'] + "_" + inst['strategy']['module']:
+                            fx = inst['strategy'].get('fx', 1.0) if 'fx' in inst['strategy'] else 1.0
+                            mult = inst['strategy'].get('multiplier', 1.0) if 'multiplier' in inst['strategy'] else 1.0
+                            break
+                    daily_pnl += price_change * prev_pos * mult * fx
+                # update stored prev price for next iteration
+                prev_prices[sym] = port_prices[sym].iloc[t]
+            prev_equity = prev_equity + daily_pnl
+            portfolio_pnl.append(daily_pnl)
+            port_equity.iloc[t] = prev_equity
+        # Save portfolio equity curve and stats
+        out_port = os.path.join(run_out, 'portfolio')
+        os.makedirs(out_port, exist_ok=True)
+        pd.DataFrame({'equity': port_equity}, index=port_equity.index).to_csv(
+            os.path.join(out_port, 'portfolio_equity.csv'), index_label='date')
+        fig, ax = plt.subplots()
+        ax.plot(port_equity.index, port_equity.values, label="Portfolio")
+        ax.set_title("Portfolio Equity")
+        ax.set_ylabel("Equity")
+        ax.set_xlabel("Date")
+        ax.legend()
+        fig.savefig(os.path.join(out_port, 'portfolio_equity.png'), bbox_inches='tight')
+        plt.close(fig)
+        print("Portfolio equity saved (find-signal mode)")
+        # Compute drawdowns and additional portfolio stats for summary
+        cummax = port_equity.cummax()
+        raw_dd = (cummax - port_equity) / cummax
+        # Compose a portfolio diagnostics DataFrame similar to per-asset details
+        df_port = pd.DataFrame({
+            'date': port_equity.index,
+            'equity': port_equity.values,
+            'drawdown': raw_dd.values,
+        })
+        df_port['delta_pos'] = (port_positions.diff().fillna(0) != 0).any(axis=1).astype(
+            int)  # 1 if any position changed (entry/exit) on that day
+        df_port['pnl'] = pd.Series([0.0] + portfolio_pnl, index=port_equity.index)  # align PnL series (0 for first day)
+        df_port['sample'] = 'OOS'
+        df_port['bundle'] = 1  # treat as single bundle covering entire OOS period
+        # Now compute statistics on the portfolio level
+        agg_stats = compute_statistics(df_port, out_port)
+        inst_stats["Portfolio"] = agg_stats
+    else:
+        # Standard equal-weight portfolio aggregation (existing logic, simplified for clarity)
+        symbols = [inst['symbol'] for inst in instruments]
+        rets_list = []
+        for sym, df_inst in zip(symbols, per_inst_results):
+            df_inst = df_inst.copy()
+            df_inst['date'] = pd.to_datetime(df_inst['date'])
+            df_inst.set_index('date', inplace=True)
+            r = df_inst['equity'].pct_change().fillna(0.0).rename(sym)
+            rets_list.append(r)
+        rets_df = pd.concat(rets_list, axis=1).fillna(0.0)
+        # use either equal weights or user-specified weights from portfolio_cfg
+        w_map = portfolio_cfg.get('weights', {})
+        w_vec = np.array([w_map.get(sym, 1.0 / len(symbols)) for sym in symbols], dtype=float)
+        w_vec /= w_vec.sum()
+        port_rets = rets_df.dot(w_vec)
+        port_equity = (1 + port_rets).cumprod() * total_capital
+        # Save portfolio outputs similar to above...
+        out_port = os.path.join(run_out, 'portfolio')
+        os.makedirs(out_port, exist_ok=True)
+        pd.DataFrame({'equity': port_equity}, index=port_equity.index).to_csv(
+            os.path.join(out_port, 'portfolio_equity.csv'), index_label='date')
+        fig, ax = plt.subplots()
+        ax.plot(port_equity.index, port_equity.values, label="Portfolio")
+        ax.set_title("Portfolio Equity")
+        ax.set_ylabel("Equity")
+        ax.set_xlabel("Date")
+        ax.legend()
+        fig.savefig(os.path.join(out_port, 'portfolio_equity.png'), bbox_inches='tight')
+        plt.close(fig)
+        print("Portfolio equity saved")
+        # Prepare portfolio diagnostics DataFrame for stats (similar to existing code)
+        cummax = port_equity.cummax()
+        raw_dd = (cummax - port_equity) / cummax
+        # Determine bars where any instrument is in market (for delta_pos)
+        pos_df = pd.concat([
+            df_inst.set_index('date')['position'].rename(sym)
+            for sym, df_inst in zip(symbols, per_inst_results)
+        ], axis=1).fillna(0)
+        open_pos = pos_df.abs().sum(axis=1) > 0
+        df_port = pd.DataFrame({
+            'date': port_equity.index,
+            'equity': port_equity.values,
+            'drawdown': raw_dd.values,
+            'delta_pos': open_pos.astype(int).astype(float).values,
+            'pnl': port_rets * total_capital,
+            'sample': 'OOS',
+            'bundle': 1
+        })
+        df_port.to_csv(os.path.join(out_port, 'details_all_bundles.csv'), index=False)
+        compute_statistics(df_port, out_port)
+        # Combine inst_stats and portfolio stats
+        combined_stats = pd.DataFrame.from_dict(inst_stats, orient='index')
+        combined_stats.loc['Portfolio'] = {
+            'cagr': np.nan,  # will populate below
+            # ... we will fill the portfolio stats after computing them ...
+        }
+        # Compute portfolio stats similar to how compute_statistics does aggregate, or simply read strategy_statistics.csv in out_port
+        port_stats = pd.read_csv(os.path.join(out_port, 'strategy_statistics.csv')).iloc[0].to_dict()
+        combined_stats.loc['Portfolio'] = port_stats
+        combined_stats.to_csv(os.path.join(run_out, 'combined_stats.csv'))
+        print(f"✅ combined_stats.csv created → {os.path.join(run_out, 'combined_stats.csv')}")
 
     # 5) Portfolio 30-bar return distribution with 95% CI ---------------------
     df_eq = pd.DataFrame({'equity': port_equity.values}, index=port_equity.index)
@@ -475,47 +642,7 @@ def main():
     plt.close(fig)
     print("30-bar return distribution chart saved")
 
-    # 5a) Compute drawdowns as (peak‐to‐trough)/peak
-    cummax = port_equity.cummax()
-    raw_dd = (cummax - port_equity) / cummax
 
-    # 5b) Determine bars where ANY instrument is in market
-    pos_df = pd.concat([
-        df_inst.set_index('date')['position'].rename(sym)
-        for sym, df_inst in zip(symbols, per_inst_results)
-    ], axis=1)
-    open_pos = pos_df.abs().sum(axis=1) > 0
-
-    # 5c) Build a portfolio‐level diagnostics DataFrame just like per‐asset
-    df_port = pd.DataFrame({
-        'date': port_equity.index,
-        'equity': port_equity.values,
-        'drawdown': raw_dd.values,
-        'delta_pos': open_pos.astype(int).astype(float).values,
-        'cost_usd': 0.0,
-        'cost_pct': 0.0,
-        'slip_cost': 0.0,
-        'pnl': port_rets * total_capital,
-        'sample': 'OOS',
-        'bundle': 1
-    })
-
-    # 5d) Save raw bundle‐1 details and produce all portfolio charts & CSVs
-    df_port.to_csv(os.path.join(out_port, 'details_all_bundles.csv'), index=False)
-    # This will drop into out_port:
-    #   - strategy_statistics.csv
-    #   - drawdown_distribution.png
-    #   - dd_duration_vs_magnitude.png
-    compute_statistics(df_port, out_port)
-
-    # 5e) Book-style permutation tests
-
-    # Safely fetch tests configuration (avoids KeyError if 'tests' is missing)
-    # Use the portfolio diagnostics DataFrame as our series
-    # price_data = df_port.set_index('date').copy()
-    # price_data['price_change'] = price_data['equity'].pct_change().fillna(0)
-
-    # Build a map of system‐name → its output folder
     # --- 4e) Book-Style Permutation Tests with confirmations ----------------
 
     inst_folders = {}
@@ -527,11 +654,17 @@ def main():
 
     # Test 1: OOS bundle permutation (per-asset)
     if input("Run Test 1 (OOS bundle permutation) for each asset? [y/N]: ").strip().lower().startswith('y'):
-        for inst in instruments:
+        for inst, w in zip(instruments, weights):
+            # prepare inst_cfg similarly to above
+            inst_cfg = deepcopy(cfg)
+            inst_cfg['data']['symbol'] = inst['symbol']
+            inst_cfg['fees']['mapping'] = inst['fees_mapping']
+            inst_cfg['strategy'] = inst['strategy']
+            inst_cfg['optimization']['param_grid'] = inst['param_grid']
+            # Now run the test
             folder = save_per_asset and os.path.join(run_out, inst['symbol']) or run_out
-            p1 = test1_permutation_oos(folder, B=perms)
-            pd.DataFrame({'oos_bundle_p': [p1]}) \
-                .to_csv(os.path.join(folder, 'permutation_test_oos.csv'), index=False)
+            p1 = test1_permutation_oos(inst_cfg, folder, B=perms)
+            pd.DataFrame({'oos_bundle_p': [p1]}).to_csv(os.path.join(folder, 'permutation_test_oos.csv'), index=False)
             print(f"  ✔ {inst['symbol']}: Test 1 complete (p={p1:.3f})")
 
     # Test 2: Training-process overfit (per-asset)

@@ -62,7 +62,7 @@ portfolio:
         span_short:    [10, 16, 20]
         span_long:     [50, 64, 80]
         vol_window:    [32]
-        forecast_scale: [4.1]
+#        forecast_scale: [4.1]
         cap:           [20]
         tau:           [0.2]
         idm:           [1.0]

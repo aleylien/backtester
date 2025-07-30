@@ -1,3 +1,4 @@
+from importlib import import_module
 import numpy as np
 import pandas as pd
 from typing import Dict, Callable
@@ -8,48 +9,85 @@ from backtester.backtest import run_backtest
 np.random.seed(42)
 
 
-def test1_permutation_oos(
-    inst_folder: str,
-    B: int = 1000
-) -> float:
+def test1_permutation_oos(inst_cfg: dict, inst_folder: str, B: int = 1000) -> float:
     """
-    Permutation Test 1 on bundle-level OOS:
-    1) Read results.csv, detect 'oos_pnl' (or any '*_pnl') as the OOS metric.
-    2) Load details_all_bundles.csv, group PnL by bundle.
-    3) orig_total = sum of all PnL.
-    4) For B reps: permute each bundle’s PnL array internally, sum → perm_total.
-       Count how often perm_total >= orig_total.
-    5) Return (count+1)/(B+1).
+    Permutation Test 1 on OOS price series:
+    1) Read inst_folder/results.csv to get optimal params for each bundle.
+    2) Load inst_folder/details_all_bundles.csv to get OOS price series by bundle.
+    3) Compute total actual OOS PnL (sum over all bundles).
+    4) For B permutations: for each bundle, shuffle the OOS price sequence, run strategy with fixed optimal params on this permuted price, and sum the PnL across bundles.
+       Count how many permuted total PnL >= actual total PnL.
+    5) Return p-value = (count+1)/(B+1).
     """
-    # 1) load results and find the PnL column
+    # 1) Load results.csv and extract best params per bundle
     res = pd.read_csv(f"{inst_folder}/results.csv")
     pnl_cols = [c for c in res.columns if c.lower().endswith('_pnl')]
     if not pnl_cols:
-        raise KeyError(f"No '*_pnl' column in {inst_folder}/results.csv; cols={res.columns.tolist()}")
-    ret_col = pnl_cols[0]  # e.g. 'oos_pnl'
-
-    # (we don't actually need the best bundle's params here, since we're permuting PnL itself)
-
-    # 2) load the detailed PnL by bundle
+        raise KeyError(f"No '*_pnl' column in results.csv; columns={res.columns.tolist()}")
+    pnl_col = pnl_cols[0]  # e.g. 'oos_pnl'
+    # We assume each row in results corresponds to one bundle (already optimal for that bundle)
+    best_params_list = []
+    for _, row in res.iterrows():
+        params = {k: row[k] for k in res.columns if k not in ('bundle',) and not k.startswith('oos_')}
+        # Cast vol_window to int if present (avoid float issues)
+        if 'vol_window' in params:
+            params['vol_window'] = int(params['vol_window'])
+        best_params_list.append(params)
+    # 2) Load OOS price series per bundle from details_all_bundles.csv
     det = pd.read_csv(f"{inst_folder}/details_all_bundles.csv")
-    det = det.sort_values(['bundle','date']).reset_index(drop=True)
-
-    # collect each bundle's raw PnL array
-    bundle_pnls = [grp['pnl'].values for _, grp in det.groupby('bundle')]
-
-    # 3) original total PnL
-    orig_total = det['pnl'].sum()
-
-    # 4) permutation trials
-    count = 0
+    if 'sample' in det.columns:
+        det = det[det['sample'] == 'OOS']
+    det.sort_values(['bundle', 'date'], inplace=True)
+    # Group by bundle
+    oos_groups = {bundle: grp.copy() for bundle, grp in det.groupby('bundle')}
+    # Identify price column
+    price_col = 'price' if 'price' in det.columns else 'close'
+    # 3) Calculate original total OOS PnL
+    orig_total_pnl = 0.0
+    for bundle, grp in oos_groups.items():
+        # Sum of 'pnl' column for that bundle
+        if 'pnl' in grp.columns:
+            orig_total_pnl += grp['pnl'].sum()
+        else:
+            # If details do not have PnL (e.g., find-signal mode was used without per-asset PnL),
+            # we can compute it via equity or position changes.
+            if 'equity' in grp.columns:
+                pnl_series = grp['equity'].diff().fillna(0.0)
+                orig_total_pnl += pnl_series.sum()
+            else:
+                raise KeyError("No PnL or Equity data to compute original PnL for Test 1.")
+    # 4) Permutation trials
+    strat_mod = import_module(f"backtester.strategies.{inst_cfg['strategy']['module']}")
+    strat_fn = getattr(strat_mod, inst_cfg['strategy']['function'])
+    count_ge = 0
     for _ in range(B):
-        perm_sum = 0.0
-        for arr in bundle_pnls:
-            perm_sum += np.random.permutation(arr).sum()
-        if perm_sum >= orig_total:
-            count += 1
-
-    return (count + 1) / (B + 1)
+        perm_total_pnl = 0.0
+        for i, params in enumerate(best_params_list, start=1):
+            if i not in oos_groups:
+                continue  # skip if no such bundle
+            price_series = oos_groups[i][price_col].values
+            perm_prices = np.random.permutation(price_series)
+            # Create a DataFrame for the permuted price series
+            df_perm = pd.DataFrame({price_col: perm_prices}, index=range(len(perm_prices)))
+            # Run strategy on permuted price
+            pos_df = strat_fn(df_perm, **params)
+            # Simulate PnL for this OOS segment
+            if 'position' in pos_df:
+                # Compute pnl as price diff * prev position * multiplier * fx (similar to simulate_pnl logic, but simpler for test)
+                price_diff = np.diff(perm_prices, prepend=perm_prices[0])
+                prev_pos = pos_df['position'].shift(1).fillna(0.0).values
+                pnl_arr = price_diff * prev_pos * params.get('multiplier', 1.0) * params.get('fx', 1.0)
+                perm_total_pnl += pnl_arr.sum()
+            else:
+                # If strategy returns PnL or equity directly in pos_df (less likely), use that
+                if 'pnl' in pos_df:
+                    perm_total_pnl += pos_df['pnl'].sum()
+                elif 'equity' in pos_df:
+                    perm_total_pnl += (pos_df['equity'].iloc[-1] - pos_df['equity'].iloc[0])
+        if perm_total_pnl >= orig_total_pnl:
+            count_ge += 1
+    p_value = (count_ge + 1) / (B + 1)
+    return p_value
 
 
 def test2_permutation_training(
