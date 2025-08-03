@@ -64,44 +64,65 @@ def run_strategy(df: pd.DataFrame, config: dict, **params) -> dict:
     }
 
 
-def compute_statistics(combined: pd.DataFrame, run_out: str) -> dict:
+def get_periods_per_year(tf: str) -> float:
+    """Estimate number of periods per year based on timeframe code (e.g. '1d','1h','5m')."""
+    tf = tf.lower()
+    if tf.endswith('d'):
+        # Assume 252 trading days per year
+        num = int(''.join(filter(str.isdigit, tf)) or 1)
+        return 252 / num
+    if tf.endswith('h'):
+        # Assume 24*365 hours (8760) per year for hourly data
+        num = int(''.join(filter(str.isdigit, tf)) or 1)
+        return 8760 / num
+    if tf.endswith('m'):
+        # Minutes per year (525600 for 365 days)
+        num = int(''.join(filter(str.isdigit, tf)) or 1)
+        return 525600 / num
+    return 252  # default fallback
+
+
+def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None) -> dict:
     """
     From the combined diagnostics DataFrame:
      - prints per-bundle & aggregate stats,
-     - saves three PNGs,
+     - saves PNGs,
      - writes aggregate metrics to strategy_statistics.csv,
      - returns the agg_stats dict.
+
+    Now supports `config` for timeframe-based annualization via get_periods_per_year.
     """
-    # 1) Prepare DataFrame with datetime index
+    # Prepare DataFrame with datetime index
     df = combined.copy()
     if 'date' in df.columns:
         df['date'] = pd.to_datetime(df['date'])
         df.set_index('date', drop=True, inplace=True)
     df.index.name = 'date'
 
-    # 2) Split out-of-sample bars
+    # Determine periods per year from timeframe in config
+    timeframe = config.get('data', {}).get('timeframe', '1d') if config else '1d'
+    periods = get_periods_per_year(timeframe)
+
+    # Split out-of-sample bars
     oos_full = df[df['sample'] == 'OOS']
 
-    # 2b) And only those bars with a live position
-    if 'position' in oos_full.columns:
-        oos_pos = oos_full[oos_full['position'] != 0]
-    else:
-        oos_pos = oos_full
+    # Only bars with a live position
+    oos_pos = oos_full[oos_full['position'] != 0] if 'position' in oos_full.columns else oos_full
 
-    # --- Per-bundle printout (unchanged, but now using oos_full) ---
+    # --- Per-bundle printout ---
     print("\n=== Per-Bundle Performance ===")
     for b, grp in oos_full.groupby('bundle'):
-        eq        = grp['equity']
-        ret       = eq.pct_change().dropna()
-        cagr      = (eq.iloc[-1]/eq.iloc[0]) ** (252/len(ret)) - 1
-        ann_vol   = ret.std() * np.sqrt(252)
-        sharpe    = (ret.mean()/ret.std()*np.sqrt(252)) if ret.std()>0 else np.nan
-        neg       = ret[ret<0]
-        sortino   = (ret.mean()/neg.std()*np.sqrt(252)) if len(neg)>0 else np.nan
+        eq      = grp['equity']
+        ret     = eq.pct_change().dropna()
+        cagr    = (eq.iloc[-1]/eq.iloc[0]) ** (periods/len(ret)) - 1
+        ann_vol = ret.std() * np.sqrt(periods) if ret.std()>0 else np.nan
+        sharpe  = (ret.mean()/ret.std()*np.sqrt(periods)) if ret.std()>0 else np.nan
+        neg     = ret[ret<0]
+        sortino = (ret.mean()/neg.std()*np.sqrt(periods)) if len(neg)>0 else np.nan
 
-        dd_vals   = grp['drawdown'].dropna()
-        max_dd    = dd_vals.max()
-        avg_dd    = dd_vals[dd_vals>0].mean()
+        dd_vals = grp['drawdown'].dropna()
+        max_dd  = dd_vals.max()
+        avg_dd  = dd_vals[dd_vals>0].mean()
 
         # drawdown durations
         durs = []
@@ -117,16 +138,14 @@ def compute_statistics(combined: pd.DataFrame, run_out: str) -> dict:
             durs.append(curr)
         avg_dd_dur = np.mean(durs) if durs else 0
 
-        # trade-based metrics only on bars with position != 0
-        trades    = grp['delta_pos'].abs().gt(0).sum()
-        pnl_sum   = grp['pnl'].sum()
-        wins      = grp['pnl'][grp['pnl']>0].sum()
-        loss      = -grp['pnl'][grp['pnl']<0].sum()
-        pf        = (wins/loss) if loss>0 else np.nan
-        expectancy= pnl_sum/trades if trades>0 else np.nan
-        win_rate  = grp['pnl'].gt(0).sum()/trades if trades>0 else np.nan
+        trades     = grp['delta_pos'].abs().gt(0).sum()
+        wins       = grp['pnl'][grp['pnl']>0].sum()
+        loss       = -grp['pnl'][grp['pnl']<0].sum()
+        pf         = (wins/loss) if loss>0 else np.nan
+        expectancy = grp['pnl'].sum()/trades if trades>0 else np.nan
+        win_rate   = grp['pnl'].gt(0).sum()/trades if trades>0 else np.nan
 
-        std_dev   = ret.std()
+        std_dev    = ret.std()
         tail_5, tail_95 = np.percentile(ret, [5, 95])
 
         print(
@@ -139,21 +158,14 @@ def compute_statistics(combined: pd.DataFrame, run_out: str) -> dict:
 
     # --- Aggregate Performance ---
     print("\n=== Aggregate Performance ===")
-
-    # equity‐return series from all bundles
-    all_rets = pd.concat([
-        g['equity'].pct_change().dropna()
-        for _, g in oos_full.groupby('bundle')
-    ])
-
-    # equity‐based metrics on oos_full / all_rets
-    cagr_a       = (all_rets.add(1).prod()) ** (252/len(all_rets)) - 1
-    ann_vol_a    = all_rets.std() * np.sqrt(252)
-    sharpe_a     = (all_rets.mean()/all_rets.std()*np.sqrt(252)) if all_rets.std()>0 else np.nan
-    neg_a        = all_rets[all_rets<0]
-    sortino_a    = (all_rets.mean()/neg_a.std()*np.sqrt(252)) if len(neg_a)>0 else np.nan
-    max_dd_a     = oos_full['drawdown'].max()
-    avg_dd_a     = oos_full['drawdown'][oos_full['drawdown']>0].mean()
+    all_rets = pd.concat([g['equity'].pct_change().dropna() for _, g in oos_full.groupby('bundle')])
+    cagr_a    = (all_rets.add(1).prod()) ** (periods/len(all_rets)) - 1
+    ann_vol_a = all_rets.std() * np.sqrt(periods) if all_rets.std()>0 else np.nan
+    sharpe_a  = (all_rets.mean()/all_rets.std()*np.sqrt(periods)) if all_rets.std()>0 else np.nan
+    neg_a     = all_rets[all_rets<0]
+    sortino_a = (all_rets.mean()/neg_a.std()*np.sqrt(periods)) if len(neg_a)>0 else np.nan
+    max_dd_a  = oos_full['drawdown'].max()
+    avg_dd_a  = oos_full['drawdown'][oos_full['drawdown']>0].mean()
 
     # aggregate drawdown durations
     dur_list = []
@@ -170,58 +182,63 @@ def compute_statistics(combined: pd.DataFrame, run_out: str) -> dict:
             dur_list.append(curr)
     avg_dd_dur_a = np.mean(dur_list) if dur_list else 0
 
-    # return‐percentiles
     tail_5_a, tail_95_a = np.percentile(all_rets, [5, 95])
 
-    # trade‐based metrics on oos_pos only
     trades_a     = oos_pos['delta_pos'].abs().gt(0).sum()
     wins_a       = oos_pos['pnl'][oos_pos['pnl']>0].sum()
     loss_a       = -oos_pos['pnl'][oos_pos['pnl']<0].sum()
     pf_a         = (wins_a/loss_a) if loss_a>0 else np.nan
     expectancy_a = oos_pos['pnl'].sum()/trades_a if trades_a>0 else np.nan
     win_rate_a   = oos_pos['pnl'].gt(0).sum()/trades_a if trades_a>0 else np.nan
-
     std_dev_a    = all_rets.std()
+    avg_win_a    = all_rets[all_rets>0].mean()
+    avg_loss_a   = all_rets[all_rets<0].mean()
+    max_loss_bar_a = all_rets.min()
 
-    avg_win_a = all_rets[all_rets > 0].mean()
-    avg_loss_a = all_rets[all_rets < 0].mean()  # This will be a negative number
-    max_loss_bar_a = all_rets.min()  # most negative return
-
-    # Print them (for console output)
-    print(
-        f"Aggregate: CAGR={cagr_a:.2%}, Vol={ann_vol_a:.2%}, Sharpe={sharpe_a:.2f}, "
-        f"Sortino={sortino_a:.2f}, MaxDD={max_dd_a:.2%}, AvgDD={avg_dd_a:.2%}, "
-        f"AvgDDdur={avg_dd_dur_a:.1f}, PF={pf_a:.2f}, Exp={expectancy_a:.2f}, "
-        f"WR={win_rate_a:.1%}, Std={std_dev_a:.4f}, "
-        f"5%={tail_5_a:.2%}, 95%={tail_95_a:.2%}, "
-        f"AvgWin={avg_win_a:.2%}, AvgLoss={avg_loss_a:.2%}, MaxLoss={max_loss_bar_a:.2%}"
-    )
-
-    # --- Save aggregate stats to CSV (all metrics!) ---
     agg_stats = {
-        'cagr':           cagr_a,
-        'annual_vol':     ann_vol_a,
-        'sharpe':         sharpe_a,
-        'sortino':        sortino_a,
-        'max_drawdown':   max_dd_a,
-        'avg_drawdown':   avg_dd_a,
+        'cagr':            cagr_a,
+        'annual_vol':      ann_vol_a,
+        'sharpe':          sharpe_a,
+        'sortino':         sortino_a,
+        'max_drawdown':    max_dd_a,
+        'avg_drawdown':    avg_dd_a,
         'avg_dd_duration': avg_dd_dur_a,
-        'profit_factor':  pf_a,
-        'expectancy':     expectancy_a,
-        'win_rate':       win_rate_a,
-        'std_daily':      std_dev_a,
-        'ret_5pct':       tail_5_a,
-        'ret_95pct':      tail_95_a,
-        'avg_win':        avg_win_a if not np.isnan(avg_win_a) else 0.0,
-        'avg_loss':       avg_loss_a if not np.isnan(avg_loss_a) else 0.0,
-        'max_loss_pct':   max_loss_bar_a if not np.isnan(max_loss_bar_a) else 0.0
+        'profit_factor':   pf_a,
+        'expectancy':      expectancy_a,
+        'win_rate':        win_rate_a,
+        'std_daily':       std_dev_a,
+        'ret_5pct':        tail_5_a,
+        'ret_95pct':       tail_95_a,
+        'avg_win':         avg_win_a if not np.isnan(avg_win_a) else 0.0,
+        'avg_loss':        avg_loss_a if not np.isnan(avg_loss_a) else 0.0,
+        'max_loss_pct':    max_loss_bar_a if not np.isnan(max_loss_bar_a) else 0.0
     }
+
+    # Save aggregate CSV
     pd.DataFrame([agg_stats]).to_csv(
         os.path.join(run_out, "strategy_statistics.csv"), index=False
     )
-    print(f"Strategy statistics saved to {os.path.join(run_out, 'strategy_statistics.csv')}")
 
-    # --- Charts (unchanged) ---
+    # Transaction cost metrics
+    avg_cost_frac = np.nan
+    sharpe_no_cost = np.nan
+    if {'cost_usd','cost_pct','slip_cost'}.issubset(oos_full.columns):
+        notional = oos_full['price'] * oos_full['delta_pos'].abs()
+        total_notional = notional.sum()
+        total_cost = oos_full['cost_usd'].sum() + oos_full['cost_pct'].sum() + oos_full['slip_cost'].sum()
+        if total_notional>0:
+            avg_cost_frac = total_cost/total_notional
+        gross_list=[]
+        for _, grp in oos_full.groupby('bundle'):
+            eq_gross = grp['equity'] + (grp['cost_usd']+grp['cost_pct']+grp['slip_cost']).cumsum()
+            gross_list.append(eq_gross.pct_change().dropna())
+        all_gross = pd.concat(gross_list)
+        if all_gross.std()>0:
+            sharpe_no_cost = (all_gross.mean()/all_gross.std()*np.sqrt(periods))
+    if not np.isnan(avg_cost_frac):   agg_stats['avg_cost_pct']=avg_cost_frac
+    if not np.isnan(sharpe_no_cost): agg_stats['sharpe_no_cost']=sharpe_no_cost
+
+    # --- Charts ---
     # drawdown distribution
     dd_vals = oos_full['drawdown'].dropna()
     fig, ax = plt.subplots()
