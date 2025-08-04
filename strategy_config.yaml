@@ -42,6 +42,7 @@ fees:
 portfolio:
   # single total capital for the whole run
   capital: 100000
+#  max_open_trades: 4 # uncomment if find-signal mode needed
 
   # optional weights per asset (must sum to 1.0; will normalize otherwise)
 #  weights:
@@ -62,17 +63,24 @@ portfolio:
         span_short:    [10, 16, 20]
         span_long:     [50, 64, 80]
         vol_window:    [32]
-#        forecast_scale: [4.1]
         cap:           [20]
         tau:           [0.2]
         idm:           [1.0]
         multiplier:    [5.0]
         fx:            [1.0]
-    # (add more strategy blocks here as needed)
+    trend_breakout:
+      module: 'trend breakout'
+      function: 'trend_breakout'
+      param_grid:
+        horizons: [20, 40, 80]
+        cap: [ 20 ]
+        vol_window: [ 32 ]
+        multiplier: [ 5.0 ]
+        tau: [ 0.2 ]
 
   # 3) map tickers → list of strategy‐keys; use `default:` for the bulk
   assignments:
-    default: [ewmac]
+    default: [ewmac, trend_breakout]
     # you can override per-ticker, e.g.:
     # SP500: [ewmac, momentum]
     # DAX:   [momentum]

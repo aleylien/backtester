@@ -1,0 +1,65 @@
+Strategy Integration Guidelines
+
+Below are the guidelines and absolute requirements for any strategy function:
+
+1. Function Signature:
+   - Must accept df: pd.DataFrame (with df['close']).
+   - Include parameters matching strategy_config.yaml param_grid.
+   - Must include multiplier: float and fx: float parameters.
+
+2. Input DataFrame:
+   - df['close'] column required.
+   - DateTimeIndex preferred.
+   - Do not modify df in-place.
+
+3. Output DataFrame:
+   - Same length/index as input.
+   - For forecast strategies, include 'raw_forecast', 'scaled_forecast', 'capped_forecast'.
+        - raw_forecast can be the same as smoothed forecast
+        - scaled_forecast = raw_forecast * forecast_scale, where
+        forecast_scale = 10.0 / (avg_abs_forecast if avg_abs_forecast != 0 else 1.0)
+        - capped = scaled.clip(-cap, cap), where cap is an imported variable (default: 20)
+   - Must include 'position' column (int), the 'position' variable should be noted as 'N'.
+        - N_unrounded = capped * capital * idm * weight * tau / (10 * multiplier * price * fx * ann_std)
+        - After calculating N_unrounded a final N is calculated using buffering rules:
+            - Decide on a conservative buffer fraction F (for example, 0.10) of your average long position
+            - For each instrument, compute the buffer B by multiplying F, capital, IDM, instrument weight and tau, then dividing by the product of the contract multiplier, the instrument price, the FX rate and the forecast standard deviation
+            - Let N be the unrounded optimal number of contracts you would hold
+            - Calculate the lower buffer limit as the rounded value of N minus B
+            - Calculate the upper buffer limit as the rounded value of N plus B
+            - Observe your current position C (in whole contracts)
+                - If C lies between the lower and upper buffer limits (inclusive), do nothing
+                - If C is below the lower buffer limit, buy the difference between the lower buffer limit and C
+                - If C is above the upper buffer limit, sell the difference between C and the upper buffer limit
+   - Do not override reserved names: equity, drawdown, bundle, sample, pnl, cost_usd, cost_pct, slip_cost.
+
+4. NaN Handling:
+   - Leave rolling indicator NaNs, then fill positions to zero:
+     N_unrounded.fillna(0.0); position = round(N_unrounded).
+
+5. No P&L Simulation:
+   - Framework simulates PnL; strategy must not compute equity or pnl.
+
+6. Respect multiplier & fx:
+   - Accept these params to allow correct sizing.
+
+7. Forecast-Scale Automation:
+   - Handle forecast_scale=None or 0 by computing avg_abs and scaling.
+
+8. Timeframe-Agnostic:
+   - No hard-coded annualization; rely on framework's get_periods_per_year.
+
+9. Vectorization:
+   - Use Pandas/NumPy vector operations, not Python loops.
+
+10. Parameter Names & Config:
+   - Function parameter names must exactly match config keys.
+
+Minimum Skeleton:
+
+def my_strategy(df, window=20, threshold=1.0, multiplier=1.0, fx=1.0):
+    price = df['close']
+    sma = price.rolling(window).mean()
+    signal = (price - sma) / sma
+    pos = (signal > threshold).astype(int)
+    return DataFrame with columns: raw_forecast, scaled_forecast, capped_forecast, position

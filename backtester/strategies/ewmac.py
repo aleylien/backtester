@@ -11,7 +11,7 @@ def ewmac(
         cap: float = 20.0,
         capital: float = 100_000,
         idm: float = 1.0,
-        weight: float = 0.2,
+        # weight: float = 0.2,
         tau: float = 1.0,
         multiplier: float = 50.0,
         fx: float = 1.0,
@@ -56,7 +56,7 @@ def ewmac(
 
     # Ideal position (unrounded) based on forecast and risk allocation
     N_unrounded = (
-            capped * capital * idm * weight * tau
+            capped * capital * idm * tau
             / (10 * multiplier * price * fx * ann_std)
     )
     # If there are NaNs (e.g., initial bars), treat them as 0 (no position due to insufficient data)
