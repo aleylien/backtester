@@ -81,6 +81,10 @@ portfolio:
   # 3) map tickers → list of strategy‐keys; use `default:` for the bulk
   assignments:
     default: [ewmac, trend_breakout]
+#  assignments:
+#    default: [ ewmac ]
+
+
     # you can override per-ticker, e.g.:
     # SP500: [ewmac, momentum]
     # DAX:   [momentum]

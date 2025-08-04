@@ -81,6 +81,8 @@ def run_backtest(df: pd.DataFrame, config: dict) -> pd.DataFrame:
         c) Collect OOS metrics (sharpe, pnl, profit_factor, max_drawdown, etc.)
      3) Return one row per bundle with best‐params + oos_<metric>.
     """
+    df = df.copy()
+
     n_bundles = config['optimization']['bundles']
     target    = config['optimization']['target']
     grid      = config['optimization']['param_grid']

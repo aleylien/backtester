@@ -344,11 +344,12 @@ def main():
         dl = DataLoader(data_dir=inst_cfg['data']['path'], symbol=symbol,
                         timeframe=inst_cfg['data']['timeframe'],
                         base_timeframe=inst_cfg['data'].get('base_timeframe'))
-        df_inst = dl.load()
+        df_inst = dl.load().copy()
         start, end = inst_cfg['data'].get('start'), inst_cfg['data'].get('end')
         if start or end:
-            df = df_inst.loc[start or df_inst.index[0]: end or df_inst.index[-1]]
-        # Run walk-forward optimization
+            # Trim the DataFrame to the specified date range
+            df_inst = df_inst.loc[start or df_inst.index[0]: end or df_inst.index[-1]]
+        # Run walk-forward optimization on the filtered data
         results_inst = run_backtest(df_inst, inst_cfg)
         out_sub = os.path.join(run_out,
                    f"{symbol}_{strat_mod_name}" if save_per_asset and symbol_counts[symbol] > 1

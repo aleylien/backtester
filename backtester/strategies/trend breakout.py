@@ -47,6 +47,9 @@ def trend_breakout(
 
     # 1. Compute smoothed raw forecasts for each horizon
     raw_variations = []
+    # Ensure horizons is a list, even if a single int is provided
+    if isinstance(horizons, int):
+        horizons = [horizons]
     for h in horizons:
         # rolling high, low, mid
         hi = price.rolling(window=h).max()
