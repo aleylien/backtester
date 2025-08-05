@@ -297,7 +297,6 @@ def main():
         json.dump(cfg, f, indent=2)
     print(f"Running into → {run_out}")
 
-
     save_per_asset = bool(cfg['output'].get('save_per_asset', 0))
 
     # 1) Build instrument list (same as before)

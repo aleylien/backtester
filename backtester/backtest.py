@@ -90,11 +90,13 @@ def run_backtest(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     results = []
 
     for i, (train_df, test_df) in enumerate(generate_splits(df, n_bundles), start=1):
-        # print(f"Bundle {i}/{n_bundles}: train={len(train_df):,} bars, test={len(test_df):,} bars")
+        # Debug
+        print(f"Bundle {i}/{n_bundles}: train={len(train_df):,} bars, test={len(test_df):,} bars")
 
         # a) find best params on IS
         best_params = optimize_strategy(train_df, grid, target, config)
-        # print(f"  → Best params: {best_params}")
+        # Debug
+        print(f"  → Best params: {best_params}")
 
         # b) evaluate on OOS
         metrics = run_strategy(test_df, config, **best_params)

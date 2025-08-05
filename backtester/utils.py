@@ -109,111 +109,169 @@ def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None
     # Only bars with a live position
     oos_pos = oos_full[oos_full['position'] != 0] if 'position' in oos_full.columns else oos_full
 
-    # --- Per-bundle printout ---
     print("\n=== Per-Bundle Performance ===")
+    all_trade_pnls = []  # collect PnL of each trade across all bundles for aggregate stats
     for b, grp in oos_full.groupby('bundle'):
-        eq      = grp['equity']
-        ret     = eq.pct_change().dropna()
-        cagr    = (eq.iloc[-1]/eq.iloc[0]) ** (periods/len(ret)) - 1
-        ann_vol = ret.std() * np.sqrt(periods) if ret.std()>0 else np.nan
-        sharpe  = (ret.mean()/ret.std()*np.sqrt(periods)) if ret.std()>0 else np.nan
-        neg     = ret[ret<0]
-        sortino = (ret.mean()/neg.std()*np.sqrt(periods)) if len(neg)>0 else np.nan
+        eq = grp['equity']
+        ret = eq.pct_change().dropna()
+        # Fix CAGR to handle complete loss:
+        if len(ret) == 0 or eq.iloc[-1] <= 0:
+            cagr = -1.0  # -100% CAGR if no data or equity <= 0 (total loss or worse)
+        else:
+            cagr = (eq.iloc[-1] / eq.iloc[0]) ** (periods / len(ret)) - 1
 
+        ann_vol = ret.std() * np.sqrt(periods) if ret.std() > 0 else np.nan
+        sharpe = (ret.mean() / ret.std() * np.sqrt(periods)) if ret.std() > 0 else np.nan
+        neg = ret[ret < 0]
+        sortino = (ret.mean() / neg.std() * np.sqrt(periods)) if len(neg) > 0 else np.nan
+
+        # Drawdown metrics (unchanged)
         dd_vals = grp['drawdown'].dropna()
-        max_dd  = dd_vals.max()
-        avg_dd  = dd_vals[dd_vals>0].mean()
-
-        # drawdown durations
+        max_dd = dd_vals.max()
+        avg_dd = dd_vals[dd_vals > 0].mean()
+        # Average drawdown duration in bars
         durs = []
         curr = 0
         for x in grp['drawdown']:
-            if x>0:
+            if x > 0:
                 curr += 1
             else:
-                if curr>0:
+                if curr > 0:
                     durs.append(curr)
                     curr = 0
-        if curr>0:
+        if curr > 0:
             durs.append(curr)
         avg_dd_dur = np.mean(durs) if durs else 0
 
-        trades     = grp['delta_pos'].abs().gt(0).sum()
-        wins       = grp['pnl'][grp['pnl']>0].sum()
-        loss       = -grp['pnl'][grp['pnl']<0].sum()
-        pf         = (wins/loss) if loss>0 else np.nan
-        expectancy = grp['pnl'].sum()/trades if trades>0 else np.nan
-        win_rate   = grp['pnl'].gt(0).sum()/trades if trades>0 else np.nan
+        # **Trade-level performance stats**
+        positions = grp['position']
+        pnl_series = grp['pnl']
+        trade_pnls = []
+        current_pnl = 0.0
+        last_sign = 0  # track the sign of the last open position (1 for long, -1 for short, 0 for flat)
 
-        std_dev    = ret.std()
-        tail_5, tail_95 = np.percentile(ret, [5, 95])
+        for pos, pnl in zip(positions, pnl_series):
+            sign = 0 if pos == 0 else (1 if pos > 0 else -1)
+            if last_sign == 0 and sign != 0:
+                # Trade opens
+                last_sign = sign
+                current_pnl = 0.0
+                current_pnl += pnl  # include any immediate cost on entry
+            elif last_sign != 0:
+                if sign == 0:
+                    # Trade closes
+                    current_pnl += pnl  # include PnL on the closing bar
+                    trade_pnls.append(current_pnl)
+                    last_sign = 0
+                    current_pnl = 0.0
+                elif sign != last_sign:
+                    # Position flipped direction (close old trade and start new back-to-back)
+                    # Split the current bar's PnL between the closing trade and the new trade
+                    half_pnl = pnl * 0.5
+                    current_pnl += half_pnl
+                    trade_pnls.append(current_pnl)  # close old trade with half the bar's PnL
+                    # Start a new trade with remaining half PnL
+                    last_sign = sign
+                    current_pnl = half_pnl
+                    # (Note: We continue in a trade with the new direction)
+                else:
+                    # Still in an open trade
+                    current_pnl += pnl
+
+        # If a trade is still open at end of bundle, close it at final equity (assume zero PnL beyond last bar)
+        if last_sign != 0:
+            trade_pnls.append(current_pnl)
+        # Add this bundle's trades to the aggregate list
+        all_trade_pnls.extend(trade_pnls)
+
+        # Calculate trade-level metrics for this bundle
+        total_trades = len(trade_pnls)
+        wins_count = sum(1 for p in trade_pnls if p > 0)
+        loss_count = sum(1 for p in trade_pnls if p < 0)
+        # Win rate = percentage of trades with net profit (ignore breakeven trades)
+        win_rate = (wins_count / (wins_count + loss_count)) if (wins_count + loss_count) > 0 else np.nan
+        # Profit factor = ratio of total profit to total loss (trade-level)
+        total_win = sum(p for p in trade_pnls if p > 0)
+        total_loss = sum(p for p in trade_pnls if p < 0)
+        profit_factor = (total_win / -total_loss) if loss_count > 0 else (np.inf if wins_count > 0 else np.nan)
+        # Expectancy = average PnL per trade
+        expectancy = (sum(trade_pnls) / total_trades) if total_trades > 0 else np.nan
+
+        std_dev = ret.std()
+        tail_5, tail_95 = np.percentile(ret, [5, 95]) if len(ret) > 0 else (np.nan, np.nan)
 
         print(
             f"Bundle {b}: CAGR={cagr:.2%}, Vol={ann_vol:.2%}, Sharpe={sharpe:.2f}, "
             f"Sortino={sortino:.2f}, MaxDD={max_dd:.2%}, AvgDD={avg_dd:.2%}, "
-            f"AvgDDdur={avg_dd_dur:.1f}, PF={pf:.2f}, Exp={expectancy:.2f}, "
-            f"WR={win_rate:.1%}, Std={std_dev:.4f}, "
-            f"5%={tail_5:.2%}, 95%={tail_95:.2%}"
+            f"AvgDDdur={avg_dd_dur:.1f}, PF={profit_factor:.2f}, Exp={expectancy:.2f}, "
+            f"WR={win_rate:.1%}, Std={std_dev:.4f}, 5%={tail_5:.2%}, 95%={tail_95:.2%}"
         )
 
     # --- Aggregate Performance ---
     print("\n=== Aggregate Performance ===")
+    # Aggregate daily returns across all bundles (for aggregate Sharpe, Sortino, etc.)
     all_rets = pd.concat([g['equity'].pct_change().dropna() for _, g in oos_full.groupby('bundle')])
-    cagr_a    = (all_rets.add(1).prod()) ** (periods/len(all_rets)) - 1
-    ann_vol_a = all_rets.std() * np.sqrt(periods) if all_rets.std()>0 else np.nan
-    sharpe_a  = (all_rets.mean()/all_rets.std()*np.sqrt(periods)) if all_rets.std()>0 else np.nan
-    neg_a     = all_rets[all_rets<0]
-    sortino_a = (all_rets.mean()/neg_a.std()*np.sqrt(periods)) if len(neg_a)>0 else np.nan
-    max_dd_a  = oos_full['drawdown'].max()
-    avg_dd_a  = oos_full['drawdown'][oos_full['drawdown']>0].mean()
+    if len(all_rets) == 0 or (oos_full['equity'].iloc[-1] <= 0):
+        cagr_a = -1.0
+    else:
+        cagr_a = (all_rets.add(1).prod()) ** (periods / len(all_rets)) - 1
+    ann_vol_a = all_rets.std() * np.sqrt(periods) if all_rets.std() > 0 else np.nan
+    sharpe_a = (all_rets.mean() / all_rets.std() * np.sqrt(periods)) if all_rets.std() > 0 else np.nan
+    neg_a = all_rets[all_rets < 0]
+    sortino_a = (all_rets.mean() / neg_a.std() * np.sqrt(periods)) if len(neg_a) > 0 else np.nan
 
-    # aggregate drawdown durations
+    max_dd_a = oos_full['drawdown'].max()
+    avg_dd_a = oos_full['drawdown'][oos_full['drawdown'] > 0].mean()
+    # Aggregate avg drawdown duration (same logic as per-bundle)
     dur_list = []
     for _, grp in oos_full.groupby('bundle'):
         curr = 0
         for x in grp['drawdown']:
-            if x>0:
+            if x > 0:
                 curr += 1
             else:
-                if curr>0:
+                if curr > 0:
                     dur_list.append(curr)
                     curr = 0
-        if curr>0:
+        if curr > 0:
             dur_list.append(curr)
     avg_dd_dur_a = np.mean(dur_list) if dur_list else 0
 
-    tail_5_a, tail_95_a = np.percentile(all_rets, [5, 95])
+    tail_5_a, tail_95_a = np.percentile(all_rets, [5, 95]) if len(all_rets) > 0 else (np.nan, np.nan)
 
-    trades_a     = oos_pos['delta_pos'].abs().gt(0).sum()
-    wins_a       = oos_pos['pnl'][oos_pos['pnl']>0].sum()
-    loss_a       = -oos_pos['pnl'][oos_pos['pnl']<0].sum()
-    pf_a         = (wins_a/loss_a) if loss_a>0 else np.nan
-    expectancy_a = oos_pos['pnl'].sum()/trades_a if trades_a>0 else np.nan
-    win_rate_a   = oos_pos['pnl'].gt(0).sum()/trades_a if trades_a>0 else np.nan
-    std_dev_a    = all_rets.std()
-    avg_win_a    = all_rets[all_rets>0].mean()
-    avg_loss_a   = all_rets[all_rets<0].mean()
-    max_loss_bar_a = all_rets.min()
+    # **Aggregate trade-level stats**
+    total_trades_a = len(all_trade_pnls)
+    wins_count_a = sum(1 for p in all_trade_pnls if p > 0)
+    loss_count_a = sum(1 for p in all_trade_pnls if p < 0)
+    win_rate_a = (wins_count_a / (wins_count_a + loss_count_a)) if (wins_count_a + loss_count_a) > 0 else np.nan
+    total_win_a = sum(p for p in all_trade_pnls if p > 0)
+    total_loss_a = sum(p for p in all_trade_pnls if p < 0)
+    pf_a = (total_win_a / -total_loss_a) if loss_count_a > 0 else (np.inf if wins_count_a > 0 else np.nan)
+    expectancy_a = (sum(all_trade_pnls) / total_trades_a) if total_trades_a > 0 else np.nan
+
+    std_dev_a = all_rets.std()
+    avg_win_a = all_rets[all_rets > 0].mean() if len(all_rets[all_rets > 0]) > 0 else 0.0
+    avg_loss_a = all_rets[all_rets < 0].mean() if len(all_rets[all_rets < 0]) > 0 else 0.0
+    max_loss_bar_a = all_rets.min() if len(all_rets) > 0 else 0.0
 
     agg_stats = {
-        'cagr':            cagr_a,
-        'annual_vol':      ann_vol_a,
-        'sharpe':          sharpe_a,
-        'sortino':         sortino_a,
-        'max_drawdown':    max_dd_a,
-        'avg_drawdown':    avg_dd_a,
+        'cagr': cagr_a,
+        'annual_vol': ann_vol_a,
+        'sharpe': sharpe_a,
+        'sortino': sortino_a,
+        'max_drawdown': max_dd_a,
+        'avg_drawdown': avg_dd_a,
         'avg_dd_duration': avg_dd_dur_a,
-        'profit_factor':   pf_a,
-        'expectancy':      expectancy_a,
-        'win_rate':        win_rate_a,
-        'std_daily':       std_dev_a,
-        'ret_5pct':        tail_5_a,
-        'ret_95pct':       tail_95_a,
-        'avg_win':         avg_win_a if not np.isnan(avg_win_a) else 0.0,
-        'avg_loss':        avg_loss_a if not np.isnan(avg_loss_a) else 0.0,
-        'max_loss_pct':    max_loss_bar_a if not np.isnan(max_loss_bar_a) else 0.0
+        'profit_factor': pf_a,
+        'expectancy': expectancy_a,
+        'win_rate': win_rate_a,
+        'std_daily': std_dev_a,
+        'ret_5pct': tail_5_a,
+        'ret_95pct': tail_95_a,
+        'avg_win': avg_win_a if not np.isnan(avg_win_a) else 0.0,
+        'avg_loss': avg_loss_a if not np.isnan(avg_loss_a) else 0.0,
+        'max_loss_pct': max_loss_bar_a if not np.isnan(max_loss_bar_a) else 0.0
     }
-
     # Save aggregate CSV
     pd.DataFrame([agg_stats]).to_csv(
         os.path.join(run_out, "strategy_statistics.csv"), index=False

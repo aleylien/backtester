@@ -4,17 +4,16 @@ import numpy as np
 
 def ewmac(
         df: pd.DataFrame,
-        span_short: int = 16,
-        span_long: int = 64,
+        capital,
         vol_window: int = 21,
-        forecast_scale: float = 4.1,
+        # forecast_scale: float = 4.1,
         cap: float = 20.0,
-        capital: float = 100_000,
         idm: float = 1.0,
-        # weight: float = 0.2,
-        tau: float = 1.0,
+        tau: float = 0.2,
         multiplier: float = 50.0,
         fx: float = 1.0,
+        span_short: int = 16,
+        span_long: int = 64,
 ) -> pd.DataFrame:
     """
     Computes EWMA crossover forecasts, sizes positions to N contracts,
@@ -38,13 +37,18 @@ def ewmac(
 
     # Compute raw forecast
     raw = (ewma_s - ewma_l) / sigma_price
-    # --- Automatically determine forecast_scale if requested ---
-    if forecast_scale is None or forecast_scale == 0:
-        # Avoid including NaNs in mean (use dropna); use absolute mean as per formula
-        avg_abs_forecast = raw.abs().mean(skipna=True)
-        # Set scale so that long-run average |scaled_forecast| ≈ 10
-        # If avg_abs_forecast is 0 (degenerate case), fallback to 1 to avoid division by zero
-        forecast_scale = 10.0 / (avg_abs_forecast if avg_abs_forecast != 0 else 1.0)
+    # # --- Automatically determine forecast_scale if requested ---
+    # if forecast_scale is None or forecast_scale == 0:
+    #     # Avoid including NaNs in mean (use dropna); use absolute mean as per formula
+    #     avg_abs_forecast = raw.abs().mean(skipna=True)
+    #     # Set scale so that long-run average |scaled_forecast| ≈ 10
+    #     # If avg_abs_forecast is 0 (degenerate case), fallback to 1 to avoid division by zero
+    #     forecast_scale = 10.0 / (avg_abs_forecast if avg_abs_forecast != 0 else 1.0)
+    # Avoid including NaNs in mean (use dropna); use absolute mean as per formula
+    avg_abs_forecast = raw.abs().mean(skipna=True)
+    # Set scale so that long-run average |scaled_forecast| ≈ 10
+    # If avg_abs_forecast is 0 (degenerate case), fallback to 1 to avoid division by zero
+    forecast_scale = 10.0 / (avg_abs_forecast if avg_abs_forecast != 0 else 1.0)
     scaled = raw * forecast_scale
     capped = scaled.clip(-cap, cap)
 

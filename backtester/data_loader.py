@@ -13,10 +13,26 @@ class DataLoader:
         self.base_timeframe = base_timeframe
 
     def load(self) -> pd.DataFrame:
+        # 1) Get the raw OHLC (or aggregated) data
         if self.base_timeframe:
-            return self._aggregate_from_lower()
+            df = self._aggregate_from_lower()
         else:
-            return self._load_csv()
+            df = self._load_csv()
+
+        # 2) Ensure downstream code can always reference df['price']
+        if 'price' not in df.columns:
+            # Prefer lowercase 'close'
+            if 'close' in df.columns:
+                df['price'] = df['close']
+            # Fallback to uppercase 'Close'
+            elif 'Close' in df.columns:
+                df['price'] = df['Close']
+            # Final fallback: take the first numeric column
+            else:
+                df['price'] = df.select_dtypes(include='number').iloc[:, 0]
+
+        # 3) Return the augmented DataFrame
+        return df
 
 
     def _read_csv(self, file: Path) -> pd.DataFrame:
