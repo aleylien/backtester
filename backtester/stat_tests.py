@@ -9,7 +9,7 @@ from backtester.backtest import run_backtest
 np.random.seed(42)
 
 
-def test1_permutation_oos(inst_cfg: dict, inst_folder: str, B: int = 1000) -> float:
+def test1_permutation_oos(inst_cfg: dict, inst_folder: str, w, B: int = 1000) -> float:
     """
     Permutation Test 1 on OOS price series:
     1) Read inst_folder/results.csv to get optimal params for each bundle.
@@ -70,6 +70,9 @@ def test1_permutation_oos(inst_cfg: dict, inst_folder: str, B: int = 1000) -> fl
             # Build a permuted series under the name 'close' so strategy can find it
             df_perm = pd.DataFrame({'close': perm_prices})
             # Run strategy on permuted price
+
+            params['capital'] = inst_cfg['portfolio']['capital'] * w
+
             pos_df = strat_fn(df_perm, **params)
             # Simulate PnL for this OOS segment
             if 'position' in pos_df:
@@ -202,15 +205,15 @@ def permutation_test_multiple(
         if perm_returns[winner] >= orig[winner]:
             best_counts[winner] += 1
 
-    # 3) Build result DataFrame
+    # 3) Build result DataFrame (explicit 'System' column; no index)
     rows = []
     for name in orig:
         rows.append({
-            'system':    name,
-            'solo_p':    (solo_counts[name] + 1) / (B + 1),
-            'unbiased_p':(best_counts[name] + 1) / (B + 1)
+            'System':     name,
+            'solo_p':     (solo_counts[name] + 1) / (B + 1),
+            'unbiased_p': (best_counts[name] + 1) / (B + 1)
         })
-    return pd.DataFrame(rows).set_index('system')
+    return pd.DataFrame(rows)
 
 
 def partition_return(

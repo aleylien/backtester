@@ -155,7 +155,7 @@ def generate_summary_md(run_out: str, cfg: dict, portfolio_cfg, save_per_asset, 
     md = []
     md.append(f"# Backtest Summary: `{os.path.basename(run_out)}`")
     md.append(f"**Run date:** {datetime.now():%Y-%m-%d %H:%M}")
-    md.append(f"**Strategy:** `{cfg['strategy']['module']}.{cfg['strategy']['function']}`")
+    # md.append(f"**Strategy:** `{cfg['strategy']['module']}.{cfg['strategy']['function']}`")
     md.append("")
 
     md.append("**Contents:**")
@@ -202,7 +202,9 @@ def generate_summary_md(run_out: str, cfg: dict, portfolio_cfg, save_per_asset, 
     rows = []
     for inst in instruments:
         sym    = inst["symbol"]
-        folder = save_per_asset and os.path.join(run_out, sym) or run_out
+        strategy = inst['strategy']['module']
+        ins_strat_folder = f"{sym}_{strategy}"
+        folder = save_per_asset and os.path.join(run_out, ins_strat_folder) or run_out
 
         # load each test result (or N/A if missing)
         p1 = pd.read_csv(os.path.join(folder, "permutation_test_oos.csv")).iloc[0,0] \
@@ -216,7 +218,7 @@ def generate_summary_md(run_out: str, cfg: dict, portfolio_cfg, save_per_asset, 
         skill     = pr["skill"].iloc[0]    if pr is not None else None
 
         rows.append({
-            "Instrument":   sym,
+            "Instrument":   f"{sym}-{strategy}",
             "Test 1 p":     f"{p1:.3f}" if p1 is not None else "N/A",
             "Test 2 p":     f"{p2:.3f}" if p2 is not None else "N/A",
             "Trend":        f"{trend:.1f}" if trend is not None else "N/A",
@@ -232,13 +234,21 @@ def generate_summary_md(run_out: str, cfg: dict, portfolio_cfg, save_per_asset, 
     # --- 3. Multiple-System Selection Bias ---
     p5 = os.path.join(run_out, "permutation_test_multiple.csv")
     if os.path.exists(p5):
-        df5 = pd.read_csv(p5, index_col=0)
-        df5.index.name = "System"
-        # Format all numeric columns to three decimal places
+        df5 = pd.read_csv(p5)  # 'System' is a column
+
+        # Split System -> Instrument/Strategy
+        df5[['Instrument', 'Strategy']] = df5['System'].str.split('_', n=1, expand=True)
+
+        # Format numerics
         for col in df5.select_dtypes(include=['number']).columns:
             df5[col] = df5[col].apply(lambda x: f"{x:.3f}")
+
+        # Reorder & render
+        cols_first = ['Instrument', 'Strategy', 'System']
+        cols_rest = [c for c in df5.columns if c not in cols_first]
+        df5 = df5[cols_first + cols_rest]
         md.append("## 3. Multiple-System Selection Bias")
-        md.append(df_to_markdown(df5.reset_index()))
+        md.append(df_to_markdown(df5))
         md.append("")
 
     # --- 4. Key Charts ---
@@ -261,16 +271,16 @@ def generate_summary_md(run_out: str, cfg: dict, portfolio_cfg, save_per_asset, 
     corr_asset_csv = os.path.join(run_out, "asset_correlation.csv")
     if os.path.exists(corr_asset_csv):
         md.append("## 5. Correlation Analysis")
-        asset_corr = pd.read_csv(corr_asset_csv, index_col=0)
-        md.append("### Asset Return Correlation")
-        md.append(df_to_markdown(asset_corr.reset_index(), decimals=2))
-        md.append("")
         strat_corr_csv = os.path.join(run_out, "strategy_correlation.csv")
         if os.path.exists(strat_corr_csv):
             strat_corr = pd.read_csv(strat_corr_csv, index_col=0)
             md.append("### Strategy Return Correlation")
             md.append(df_to_markdown(strat_corr.reset_index(), decimals=2))
             md.append("")
+        asset_corr = pd.read_csv(corr_asset_csv, index_col=0)
+        md.append("### Asset Return Correlation")
+        md.append(df_to_markdown(asset_corr.reset_index(), decimals=2))
+        md.append("")
 
     # write file
     out_md = os.path.join(run_out, "summary.md")
@@ -290,7 +300,7 @@ def main():
     # Create run folder
     base_out = cfg['output']['root']
     now      = datetime.now()
-    run_name = now.strftime("%H:%M %d.%m.%Y") + f" ({cfg['strategy']['module']})"
+    run_name = now.strftime("%H:%M %d.%m.%Y")    # + f" ({cfg['strategy']['module']})"
     run_out  = os.path.join(base_out, run_name)
     os.makedirs(run_out, exist_ok=True)
     with open(os.path.join(run_out, "config_used.json"), "w") as f:
@@ -613,6 +623,7 @@ def main():
         open_pos = pos_df.abs().sum(axis=1) > 0
         df_port = pd.DataFrame({
             'date': port_equity.index,
+            'position': open_pos.values,
             'equity': port_equity.values,
             'drawdown': raw_dd.values,
             'delta_pos': open_pos.astype(float).values,
@@ -746,8 +757,13 @@ def main():
 
     # --- 6) Permutation tests using --run-tests flags ---
     inst_folders = {
+        # key = "SP500_ewmac" or "SP500_trend breakout"
         f"{inst['symbol']}_{inst['strategy']['module']}":
-        (save_per_asset and os.path.join(run_out, inst['symbol']) or run_out)
+            # if saving per asset, the folder is run_out/<symbol>_<module>,
+            # otherwise it’s just run_out
+            (save_per_asset
+                and os.path.join(run_out, f"{inst['symbol']}_{inst['strategy']['module']}")
+                or run_out)
         for inst in instruments
     }
     perms = cfg.get('tests', {}).get('permutations', 1000)
@@ -760,10 +776,12 @@ def main():
             inst_cfg['fees']['mapping'] = inst['fees_mapping']
             inst_cfg['strategy'] = inst['strategy']
             inst_cfg['optimization']['param_grid'] = inst['param_grid']
-            folder = save_per_asset and os.path.join(run_out, inst['symbol']) or run_out
-            p1 = test1_permutation_oos(inst_cfg, folder, B=perms)
+            folder = save_per_asset \
+                and os.path.join(run_out, f"{inst['symbol']}_{inst['strategy']['module']}") \
+                or run_out
+            p1 = test1_permutation_oos(inst_cfg, folder, w, B=perms)
             pd.DataFrame({'oos_bundle_p': [p1]}).to_csv(os.path.join(folder, 'permutation_test_oos.csv'), index=False)
-            print(f"  ✔ {inst['symbol']}: Test 1 complete (p={p1:.3f})")
+            print(f"  ✔ {inst['symbol']} - {inst['strategy']['module']}: Test 1 complete (p={p1:.3f})")
 
     # Test 2: Training-process overfit (per-asset)
     if input("Run Test 2 (training-process overfit) for each asset? [y/N]: ").strip().lower().startswith('y'):
@@ -773,22 +791,27 @@ def main():
             inst_cfg['fees']['mapping'] = inst['fees_mapping']
             inst_cfg['strategy'] = inst['strategy']
             inst_cfg['optimization']['param_grid'] = inst['param_grid']
-            folder = save_per_asset and os.path.join(run_out, inst['symbol']) or run_out
+            folder = save_per_asset \
+                and os.path.join(run_out, f"{inst['symbol']}_{inst['strategy']['module']}") \
+                or run_out
             p2 = test2_permutation_training(inst_cfg, folder, B=perms)
             pd.DataFrame({'training_overfit_p': [p2]}).to_csv(os.path.join(folder, 'permutation_test_training.csv'), index=False)
-            print(f"  ✔ {inst['symbol']}: Test 2 complete (p={p2:.3f})")
+            print(f"  ✔ {inst['symbol']} - {inst['strategy']['module']}: Test 2 complete (p={p2:.3f})")
 
     # Test 5: Multiple-system selection bias (portfolio-wide)
     if input("Run Test 5 (multiple-system selection bias)? [y/N]: ").strip().lower().startswith('y'):
         df5 = permutation_test_multiple(inst_folders, B=perms)
-        df5.to_csv(os.path.join(run_out, 'permutation_test_multiple.csv'), index=False)
-        print(f"  ✔ Test 5 complete (saved permutation_test_multiple.csv)")
+        out_csv = os.path.join(run_out, 'permutation_test_multiple.csv')
+        df5.to_csv(out_csv, index=False)  # 'System' is a normal column now
+        print(f"  ✔ Test 5 complete (saved {out_csv})")
 
     # Test 6: Partition return (per-asset)
     if input("Run Test 6 (partition return) for each asset? [y/N]: ").strip().lower().startswith('y'):
         drift = cfg.get('tests', {}).get('drift_rate', 0.0)
         for inst, w in zip(instruments, weights):
-            folder = save_per_asset and os.path.join(run_out, inst['symbol']) or run_out
+            folder = save_per_asset \
+                and os.path.join(run_out, f"{inst['symbol']}_{inst['strategy']['module']}") \
+                or run_out
 
             # Load price series for this instrument
             dl_inst = DataLoader(
@@ -812,6 +835,9 @@ def main():
             # Re-run strategy on full data with best params to get positions
             strat_mod = import_module(f"backtester.strategies.{inst['strategy']['module']}")
             strat_fn = getattr(strat_mod, inst['strategy']['function'])
+
+            params['capital'] = inst_cfg['portfolio']['capital'] * w
+
             df_price['position'] = strat_fn(df_price, **params)['position'].values
 
             # Define a backtest function that computes total return on any given subset (for partition test)

@@ -6,9 +6,9 @@ data:
   end:   '2020-12-31'
 
 # default strategy (used if no per-asset override)
-strategy:
-  module:   'ewmac'
-  function: 'ewmac'
+#strategy:
+#  module:   'ewmac'
+#  function: 'ewmac'
 
 # global optimization defaults (can be overridden per-strategy below)
 optimization:
