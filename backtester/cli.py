@@ -373,6 +373,7 @@ def main():
                 params['vol_window'] = int(params['vol_window'])
 
             # Generate positions
+            params['capital'] = portfolio_cfg.get('capital')
             pos_df = strat_fn(test_df, **params)
 
             if portfolio_cfg.get('max_open_trades'):

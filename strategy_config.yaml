@@ -72,7 +72,7 @@ portfolio:
       module: 'trend breakout'
       function: 'trend_breakout'
       param_grid:
-        horizons: [20, 25, 40, 50, 75, 80]
+        horizon: [20, 25, 40, 50, 75, 80]
         cap: [ 20 ]
         vol_window: [ 32 ]
         multiplier: [ 5.0 ]

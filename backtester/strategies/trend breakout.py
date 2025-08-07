@@ -151,6 +151,7 @@ def trend_breakout1(
 def trend_breakout(
         df: pd.DataFrame,
         capital,
+        horizon: int,
         vol_window: int = 21,
         # forecast_scale: float = 4.1,
         cap: float = 20.0,
@@ -158,9 +159,9 @@ def trend_breakout(
         tau: float = 0.2,
         multiplier: float = 50.0,
         fx: float = 1.0,
-        horizon: float = 20,
 ) -> pd.DataFrame:
     # INPUTS
+    horizon = int(horizon)
     price = df['close']
     price_diff = price.diff().fillna(0.0)  # first diff = 0 (no prior price)
     sigma_price = price_diff.rolling(vol_window).std()
@@ -172,7 +173,7 @@ def trend_breakout(
     lo = price.rolling(window=horizon+1).min()
     mean = (hi + lo) / 2.0
     unsmoothed = 40 * (price - mean) / (hi - lo)
-    smoothed = unsmoothed.ewm(span=horizon+4)
+    smoothed = unsmoothed.ewm(span=horizon+4).mean()
     raw = smoothed
 
     # SCALING FORECASTS
@@ -198,7 +199,6 @@ def trend_breakout(
     # skip for now
 
     position = np.round(N_unrounded).astype(int)
-
 
     return pd.DataFrame({
         'price': price,

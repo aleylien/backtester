@@ -4,7 +4,7 @@ import numpy as np
 
 def ewmac(
         df: pd.DataFrame,
-        capital,
+        capital: int,
         vol_window: int = 21,
         # forecast_scale: float = 4.1,
         cap: float = 20.0,
