@@ -1,5 +1,0 @@
-,SP500 (ewmac),SP500 (trend breakout),DAX (ewmac),DAX (trend breakout)
-SP500 (ewmac),1.0,-0.0007,0.0164,0.002
-SP500 (trend breakout),-0.0007,1.0,0.007,-0.0011
-DAX (ewmac),0.0164,0.007,1.0,0.0204
-DAX (trend breakout),0.002,-0.0011,0.0204,1.0

@@ -21,39 +21,42 @@ from backtester.stat_tests import (
     permutation_test_multiple,
     partition_return
 )
+from backtester.fx import load_symbol_currency_map, get_fx_series
+from backtester.reporting_excel import export_summary_xlsx
 
 
-def get_portfolio_weights(instruments, portfolio_cfg):
+def get_portfolio_weights(instruments, weights_cfg):
     """
-    Calculate allocation weights for each instrument and total capital.
-    Returns:
-      - weights: list of floats summing to 1.0 (one per instrument)
-      - total_capital: float total capital from portfolio_cfg['capital']
+    Resolve weights with precedence: pairs > strategy > asset > equal.
+    Normalize to sum 1.0. Return (weights_list, total_capital).
     """
-    # 1) Determine total capital (if not specified, use sum of per-inst capitals or 100k each as fallback)
-    total_capital = portfolio_cfg.get(
-        'capital',
-        sum(inst.get('capital', 100_000) for inst in instruments)
-    )
-    # 2) Determine weights for each instrument
-    wcfg = portfolio_cfg.get('weights')
-    if isinstance(wcfg, dict):
-        # If weights given as a dict per symbol
-        raw = [wcfg.get(inst['symbol'], 0.0) for inst in instruments]
-        total_w = sum(raw) or 1.0
-        weights = [r / total_w for r in raw]
-    elif isinstance(wcfg, (list, tuple)):
-        # If weights given as a list, ensure it matches number of instruments
-        if len(wcfg) != len(instruments):
-            raise ValueError("portfolio.weights list must have one entry per instrument")
-        total_w = sum(wcfg) or 1.0
-        weights = [w / total_w for w in wcfg]
-    else:
-        # No weights specified: default equal weight for each instrument
-        n = len(instruments)
-        if n == 0:
-            raise ValueError("No instruments provided in portfolio!")
-        weights = [1.0 / n] * n
+    total_capital = weights_cfg.get('capital') if isinstance(weights_cfg, dict) else None
+    # Fallback to portfolio.capital if not provided here (main will pass it anyway)
+    if total_capital is None:
+        total_capital = 0  # will be set by caller
+
+    w_asset = (weights_cfg or {}).get('asset', {}) if isinstance(weights_cfg, dict) else {}
+    w_strategy = (weights_cfg or {}).get('strategy', {}) if isinstance(weights_cfg, dict) else {}
+    w_pairs = (weights_cfg or {}).get('pairs', {}) if isinstance(weights_cfg, dict) else {}
+
+    raw = []
+    for inst in instruments:
+        sym = inst['symbol']
+        strat_key = inst.get('strategy_key') or inst['strategy']['module']
+        pair_override = (w_pairs.get(sym, {}) or {}).get(strat_key)
+        if pair_override is not None:
+            raw.append(float(pair_override))
+            continue
+        if strat_key in w_strategy:
+            raw.append(float(w_strategy[strat_key]))
+            continue
+        if sym in w_asset:
+            raw.append(float(w_asset[sym]))
+            continue
+        raw.append(1.0)  # equal if nothing provided
+
+    s = sum(raw) or 1.0
+    weights = [x / s for x in raw]
     return weights, total_capital
 
 
@@ -78,9 +81,9 @@ def make_instrument_config(base_cfg: dict, inst: dict) -> dict:
     return inst_cfg
 
 
-def run_backtest_for_instrument(inst: dict, base_cfg: dict, portfolio_cfg: dict, fees_map: dict,
-                                weight: float, total_capital: float, save_per_asset: bool,
-                                run_out: str, symbol_counts: Counter):
+def run_backtest_for_instrument(inst, base_cfg, portfolio_cfg, fees_map, weight, total_capital,
+                                save_per_asset, run_out, symbol_counts,
+                                base_ccy, symbol_ccy_map, fx_dir, timeframe, multipliers):
     """
     Run the walk-forward backtest for a single instrument and return its detailed results and stats.
     """
@@ -108,6 +111,7 @@ def run_backtest_for_instrument(inst: dict, base_cfg: dict, portfolio_cfg: dict,
     out_dir = os.path.join(run_out, subdir)
     os.makedirs(out_dir, exist_ok=True)
     results.to_csv(os.path.join(out_dir, 'results.csv'), index=False)
+
     # 2) Re-run strategy on each OOS segment with best params to collect detailed diagnostics
     splits = list(generate_splits(df, inst_cfg['optimization']['bundles']))
     all_diags = []
@@ -119,43 +123,54 @@ def run_backtest_for_instrument(inst: dict, base_cfg: dict, portfolio_cfg: dict,
         params = {k: row[k] for k in results.columns
                   if k not in ('bundle',) and not k.startswith(('oos_', '_'))}
         if 'vol_window' in params:
-            # Cast to int if needed (to avoid float precision issues from CSV)
             params['vol_window'] = int(params['vol_window'])
+
+        # Strip only what we truly externalized (keep multiplier)
+        for k in ('fx', 'forecast_scale'):
+            params.pop(k, None)
+
         # Decide the instrument allocation once (used for sizing AND PnL/equity math)
         alloc_capital = weight * total_capital
 
-        # Pass allocation to the strategy only if it uses it for sizing (harmless if ignored)
-        params = {**params, 'capital': alloc_capital}
+        # Multiplier from JSON (must reach the strategy BEFORE calling it)
+        mult = float(multipliers.get(symbol, 1.0))
+
+        # Ensure tau reaches the strategy if not in the grid/best row
+        tau_global = None
+        try:
+            tau_global = base_cfg['portfolio']['strategy_defaults']['param_overrides']['tau']
+        except Exception:
+            pass
+        if tau_global is None:
+            tau_global = base_cfg['portfolio'].get('tau')
+        if tau_global is not None and 'tau' not in params:
+            params['tau'] = float(tau_global[0] if isinstance(tau_global, (list, tuple)) else tau_global)
+
+        # FX series for this OOS bundle aligned to its index (use in sizing + PnL; do NOT modify price series)
+        fx_series = get_fx_series(symbol, base_ccy, oos_df.index, symbol_ccy_map, fx_dir, timeframe)
+
+        # Pass sizing knobs to the strategy BEFORE calling it
+        params['capital'] = alloc_capital
+        params['multiplier'] = mult
+        params['fx'] = fx_series  # strategy may use it only in sizing denominator
 
         # Run strategy to get positions/forecasts for the OOS segment
         pos_df = strat_fn(oos_df, **params)
         if 'position' not in pos_df.columns:
             raise ValueError(f"{symbol}: strategy output must contain a 'position' column (contracts).")
 
-        notional = (
-                pos_df['position'].abs()
-                * oos_df['close']
-                * params.get('multiplier', 1.0)
-                * params.get('fx', 1.0)
-        ).median()
-        if notional > 10 * alloc_capital:
-            logging.warning(
-                "%s: positions look oversized vs allocated capital (median notional %.2f > 10x alloc %.2f).",
-                symbol, float(notional), float(alloc_capital)
-            )
-
         if find_signal_mode:
             # In find-signal mode, we don't price PnL here—just carry positions/forecasts forward
             diag = pos_df.copy()
         else:
-            # Simulate dollar PnL for the OOS segment using the SAME allocation
+            # Simulate dollar PnL for the OOS segment using LOCAL price + FX series
             fee = fees_map[symbol]
             pnl_df = simulate_pnl(
                 positions=pos_df['position'],
-                price=oos_df['close'],
-                multiplier=params.get('multiplier', 1.0),
-                fx=params.get('fx', 1.0),
-                capital=alloc_capital,  # <-- same alloc used for sizing above
+                price=oos_df['close'],  # local price (do NOT pre-multiply by FX)
+                multiplier=mult,
+                fx=fx_series,  # per-date series
+                capital=alloc_capital,
                 commission_usd=fee.get('commission_usd', 0.0),
                 commission_pct=fee.get('commission_pct', 0.0),
                 slippage_pct=fee.get('slippage_pct', 0.0),
@@ -167,11 +182,7 @@ def run_backtest_for_instrument(inst: dict, base_cfg: dict, portfolio_cfg: dict,
                 pnl_df = pnl_df.drop(columns=list(overlap_cols))
 
             diag = pos_df.join(pnl_df, how='left')
-            # Drop overlapping columns to avoid conflicts (if strategy output has columns like 'pnl', 'equity', etc.)
-            overlap_cols = pos_df.columns.intersection(pnl_df.columns)
-            if not overlap_cols.empty:
-                pnl_df = pnl_df.drop(columns=overlap_cols)
-            diag = pos_df.join(pnl_df, how='left')
+
         diag['bundle'] = int(row['bundle'])
         diag['sample'] = 'OOS'
         all_diags.append(diag.reset_index())  # reset_index to ensure 'date' is a column
@@ -738,9 +749,31 @@ def main():
     logging.basicConfig(level=getattr(logging, args.log))
     cfg = load_config(args.config)
 
+    TIMEFRAME_ALIASES = {
+        "d": "1d", "1d": "1d", "daily": "1d",
+        "h": "1h", "1h": "1h", "hour": "1h",
+        "w": "1w", "1w": "1w", "week": "1w",
+    }
+
+    def _norm_tf(s: str) -> str:
+        return TIMEFRAME_ALIASES.get(str(s).lower(), str(s))
+
+    cfg['data']['timeframe'] = _norm_tf(cfg['data'].get('timeframe', '1d'))
+
     # Load fee mappings (e.g., commission/slippage per asset)
     with open(cfg['fees']['mapping']) as f:
         fees_map = json.load(f)
+
+    fx_cfg = cfg.get('fx', {})
+    base_ccy = fx_cfg.get('base_currency', 'USD')
+    symbol_ccy_map = load_symbol_currency_map(fx_cfg.get('symbol_currency_map_file', ''))
+    fx_dir = fx_cfg.get('pairs_csv_dir', 'fx_data')
+
+    multipliers = {}
+    mm = cfg.get('market_meta', {}).get('multipliers_file')
+    if mm and os.path.exists(mm):
+        with open(mm, 'r') as f:
+            multipliers = json.load(f)
 
     # Set up output directory for this run
     base_out = cfg['output']['root']
@@ -778,8 +811,24 @@ def main():
                 inst['strategy']['fx'] = sdef['fx']
             instruments.append(inst)
 
-    # Determine weights and total capital allocation for each instrument
-    weights, total_capital = get_portfolio_weights(instruments, portfolio_cfg)
+    # 1) Total capital from portfolio section
+    total_capital = cfg['portfolio']['capital']
+
+    # 2) Resolve weights using your upgraded get_portfolio_weights(...)
+    weights_cfg = cfg.get('weights', {})  # may be {}, that's fine
+    weights, _unused = get_portfolio_weights(instruments, weights_cfg)
+
+    # 3) Save resolved weights so you can audit later (OPTIONAL but recommended)
+    resolved = pd.DataFrame(
+        [{
+            "instrument": f"{i['symbol']}|{i['strategy']['module']}",
+            "symbol": i['symbol'],
+            "strategy": i['strategy']['module'],
+            "weight": w
+        } for i, w in zip(instruments, weights)]
+    )
+    resolved.to_csv(os.path.join(run_out, "weights_resolved.csv"), index=False)
+
     symbol_counts = Counter(inst['symbol'] for inst in instruments)
 
     # Run backtest for each instrument and collect results
@@ -787,7 +836,11 @@ def main():
     per_inst_results = []
     instrument_names = []
     for inst, w in zip(instruments, weights):
-        name, combined, stats = run_backtest_for_instrument(inst, cfg, portfolio_cfg, fees_map, w, total_capital, save_per_asset, run_out, symbol_counts)
+        name, combined, stats = run_backtest_for_instrument(
+            inst, cfg, portfolio_cfg, fees_map, w, total_capital, save_per_asset,
+            run_out, symbol_counts,
+            base_ccy, symbol_ccy_map, fx_dir, cfg['data']['timeframe'], multipliers
+        )
         instrument_names.append(name)
         per_inst_results.append(combined)
         if stats is not None:
@@ -896,6 +949,12 @@ def main():
 
     # Generate Markdown summary report
     generate_summary_md(run_out, cfg, portfolio_cfg, save_per_asset, instruments)
+
+    try:
+        xlsx_path = export_summary_xlsx(run_out)
+        print(f"📊 summary.xlsx created → {xlsx_path}")
+    except Exception as e:
+        logging.warning("Excel export failed: %s", e)
 
 
 if __name__ == '__main__':

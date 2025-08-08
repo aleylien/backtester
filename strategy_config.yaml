@@ -38,11 +38,22 @@ output:
 fees:
   mapping: './fees and slippage/fees.json'
 
+fx:
+  base_currency: 'USD'
+  pairs_csv_dir: 'assets_data/fx'
+  symbol_currency_map_file: 'config/symbol_currency_map.json'
+
+market_meta:
+  multipliers_file: 'config/multipliers.json'
+
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 portfolio:
   # single total capital for the whole run
   capital: 100000
-#  max_open_trades: 4 # uncomment if find-signal mode needed
+  tau: [ 0.2 ]
+  #  max_open_trades: 4 # uncomment if find-signal mode needed
 
   # optional weights per asset (must sum to 1.0; will normalize otherwise)
 #  weights:
@@ -64,19 +75,14 @@ portfolio:
         span_long:     [50, 64, 80]
         vol_window:    [32]
         cap:           [20]
-        tau:           [0.2]
         idm:           [1.0]
-        multiplier:    [5.0]
-        fx:            [1.0]
     trend_breakout:
-      module: 'trend breakout'
+      module: 'trend_breakout'
       function: 'trend_breakout'
       param_grid:
         horizon: [20, 25, 40, 50, 75, 80]
         cap: [ 20 ]
         vol_window: [ 32 ]
-        multiplier: [ 5.0 ]
-        tau: [ 0.2 ]
 
   # 3) map tickers → list of strategy‐keys; use `default:` for the bulk
   assignments:

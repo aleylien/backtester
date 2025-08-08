@@ -6,7 +6,6 @@ def ewmac(
         df: pd.DataFrame,
         capital: int,
         vol_window: int = 21,
-        # forecast_scale: float = 4.1,
         cap: float = 20.0,
         idm: float = 1.0,
         tau: float = 0.2,
@@ -63,6 +62,7 @@ def ewmac(
             capped * capital * idm * tau
             / (10 * multiplier * price * fx * ann_std)
     )
+
     # If there are NaNs (e.g., initial bars), treat them as 0 (no position due to insufficient data)
     N_unrounded = N_unrounded.fillna(0.0)
     # Round to integer contracts

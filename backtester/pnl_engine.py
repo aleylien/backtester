@@ -4,9 +4,9 @@ import pandas as pd
 def simulate_pnl(
     positions: pd.Series,
     price:     pd.Series,
-    multiplier: float,
-    fx:         float,
-    capital:    float = 100_000,
+    multiplier,
+    fx,
+    capital,
     commission_usd: float = 0.0,
     commission_pct: float = 0.0,
     slippage_pct:   float = 0.0,
