@@ -5,7 +5,8 @@ from collections import Counter
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
+import matplotlib.dates as mdates
+from matplotlib.ticker import PercentFormatter, MultipleLocator
 from importlib import import_module
 from copy import deepcopy
 from datetime import datetime
@@ -14,7 +15,7 @@ from backtester.config import load_config
 from backtester.data_loader import DataLoader
 from backtester.backtest import run_backtest, generate_splits
 from backtester.pnl_engine import simulate_pnl
-from backtester.utils import compute_statistics, statistical_tests
+from backtester.utils import compute_statistics, filter_params_for_callable
 from backtester.stat_tests import (
     test1_permutation_oos,
     test2_permutation_training,
@@ -23,6 +24,7 @@ from backtester.stat_tests import (
 )
 from backtester.fx import load_symbol_currency_map, get_fx_series
 from backtester.reporting_excel import export_summary_xlsx
+from backtester.strategy_aggregate import aggregate_by_strategy
 
 
 def get_portfolio_weights(instruments, weights_cfg):
@@ -83,7 +85,8 @@ def make_instrument_config(base_cfg: dict, inst: dict) -> dict:
 
 def run_backtest_for_instrument(inst, base_cfg, portfolio_cfg, fees_map, weight, total_capital,
                                 save_per_asset, run_out, symbol_counts,
-                                base_ccy, symbol_ccy_map, fx_dir, timeframe, multipliers):
+                                base_ccy, symbol_ccy_map, fx_dir, timeframe, multipliers,
+                                save_per_instrument=True, strategy_inputs=None):
     """
     Run the walk-forward backtest for a single instrument and return its detailed results and stats.
     """
@@ -155,7 +158,8 @@ def run_backtest_for_instrument(inst, base_cfg, portfolio_cfg, fees_map, weight,
         params['fx'] = fx_series  # strategy may use it only in sizing denominator
 
         # Run strategy to get positions/forecasts for the OOS segment
-        pos_df = strat_fn(oos_df, **params)
+        safe_params = filter_params_for_callable(strat_fn, params)
+        pos_df = strat_fn(oos_df, **safe_params)
         if 'position' not in pos_df.columns:
             raise ValueError(f"{symbol}: strategy output must contain a 'position' column (contracts).")
 
@@ -186,12 +190,33 @@ def run_backtest_for_instrument(inst, base_cfg, portfolio_cfg, fees_map, weight,
         diag['bundle'] = int(row['bundle'])
         diag['sample'] = 'OOS'
         all_diags.append(diag.reset_index())  # reset_index to ensure 'date' is a column
+
+        # Record for strategy aggregation (only OOS rows are used later)
+        try:
+            strat_key = inst['strategy']['module']  # adapt if your key lives elsewhere
+        except Exception:
+            strat_key = str(inst.get('strategy') or 'unknown')
+
+        if strategy_inputs is not None:
+            # Keep only the columns aggregator needs
+            df_min = diag[['date', 'pnl', 'equity', 'sample']].copy() if all(
+                c in diag.columns for c in ['date', 'pnl', 'equity', 'sample']) else diag.copy()
+            strategy_inputs.append({
+                "symbol": inst['symbol'],
+                "strategy": strat_key,
+                "alloc_capital": float(weight * total_capital),
+                "df": df_min
+            })
+
     combined = pd.concat(all_diags, ignore_index=True)
-    combined.to_csv(os.path.join(out_dir, 'details_all_bundles.csv'), index=False)
-    print(f"{symbol}: details_all_bundles.csv saved")
+
+    if save_per_instrument:
+        combined.to_csv(os.path.join(out_dir, 'details_all_bundles.csv'), index=False)
+        print(f"{symbol}: details_all_bundles.csv saved")
+
     # 3) Compute performance statistics for this instrument (if not in find-signal mode)
     stats = None
-    if not find_signal_mode:
+    if save_per_instrument and not find_signal_mode:
         stats = compute_statistics(combined, out_dir, config=inst_cfg)
     return inst_name, combined, stats
 
@@ -302,6 +327,7 @@ def aggregate_portfolio(per_inst_results: list, instruments: list, instrument_na
         pnl_matrix = price_change * pos_shifted * mult_df * fx_df
         daily_pnl = pnl_matrix.sum(axis=1)
         port_equity = daily_pnl.cumsum() + total_cap
+
         # Save portfolio equity series and chart
         pd.DataFrame({'equity': port_equity}, index=port_equity.index)\
             .to_csv(os.path.join(out_port, 'portfolio_equity.csv'), index_label='date')
@@ -314,6 +340,7 @@ def aggregate_portfolio(per_inst_results: list, instruments: list, instrument_na
         fig.savefig(os.path.join(out_port, 'portfolio_equity.png'), bbox_inches='tight')
         plt.close(fig)
         print("Portfolio equity saved (find-signal mode)")
+
         # Compute basic portfolio stats and returns series
         cummax = port_equity.cummax()
         raw_dd = (cummax - port_equity) / cummax
@@ -344,18 +371,76 @@ def aggregate_portfolio(per_inst_results: list, instruments: list, instrument_na
         combined_pnl = pd.concat(pnl_series, axis=1).fillna(0.0)
         portfolio_pnl = combined_pnl.sum(axis=1)
         port_equity = portfolio_pnl.cumsum() + total_capital
-        # Save equity series and chart
-        pd.DataFrame({'equity': port_equity}, index=port_equity.index)\
-            .to_csv(os.path.join(out_port, 'portfolio_equity.csv'), index_label='date')
-        fig, ax = plt.subplots()
-        ax.plot(port_equity.index, port_equity.values, label="Portfolio")
-        ax.set_title("Portfolio Equity")
-        ax.set_ylabel("Equity")
-        ax.set_xlabel("Date")
-        ax.legend()
-        fig.savefig(os.path.join(out_port, 'portfolio_equity.png'), bbox_inches='tight')
+
+        # EQUITY CHART
+        # --- Prepare series ---
+        eq = pd.Series(port_equity).dropna().sort_index()
+        # ensure datetime index (safe even if already datetime)
+        eq.index = pd.to_datetime(eq.index)
+
+        # Rebase equity to 1.0 at start, then show % vs start
+        eq_norm = eq / float(eq.iloc[0])
+        eq_rel = eq_norm - 1.0  # 0.00 = start; 0.20 = +20%
+
+        # Drawdown (as negative %)
+        rolling_max = eq_norm.cummax()
+        dd = (eq_norm / rolling_max) - 1.0  # e.g., -0.25 = -25%
+
+        # Save data
+        pd.DataFrame({"equity_norm": eq_norm}).to_csv(
+            os.path.join(out_port, "portfolio_equity_normalized.csv"), index_label="date"
+        )
+        pd.DataFrame({"drawdown": dd}).to_csv(
+            os.path.join(out_port, "portfolio_drawdown.csv"), index_label="date"
+        )
+
+        # --- Plot ---
+        fig, (ax_top, ax_dd) = plt.subplots(
+            2, 1,
+            figsize=(12, 8),  # larger figure
+            dpi=170,  # higher resolution
+            sharex=True,
+            gridspec_kw={"height_ratios": [3, 1]}
+        )
+
+        # Top: equity (percent vs start)
+        ax_top.plot(eq_rel.index, eq_rel.values, linewidth=1.4, label="Portfolio")
+        ax_top.set_title("Portfolio Equity (Rebased to 1.0)")
+        ax_top.set_ylabel("Return vs Start")
+
+        # Format Y as percentages with 10% grid lines
+        ax_top.yaxis.set_major_formatter(PercentFormatter(xmax=1.0))  # eq_rel is fraction
+        ax_top.yaxis.set_major_locator(MultipleLocator(0.10))  # every 10%
+        ax_top.grid(axis="y", which="major", alpha=0.35, linestyle="--")
+
+        # X: year dividers & labels
+        ax_top.xaxis.set_major_locator(mdates.YearLocator())  # one tick per year
+        ax_top.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+        ax_top.grid(axis="x", which="major", alpha=0.25)
+
+        ax_top.legend(loc="best")
+
+        # Bottom: drawdown (area)
+        ax_dd.fill_between(dd.index, dd.values, 0.0, step=None, alpha=0.5)
+        ax_dd.set_ylabel("Drawdown")
+        ax_dd.yaxis.set_major_formatter(PercentFormatter(xmax=1.0))
+        ax_dd.yaxis.set_major_locator(MultipleLocator(0.10))
+        ax_dd.grid(axis="y", which="major", alpha=0.35, linestyle="--")
+        ax_dd.grid(axis="x", which="major", alpha=0.25)
+
+        # Nice ymin for dd (a bit below min), cap at 0
+        dd_min = float(dd.min()) if len(dd) else -0.01
+        ax_dd.set_ylim(min(dd_min * 1.05, -0.05), 0.0)
+
+        # Label X once at the bottom
+        ax_dd.set_xlabel("Date")
+        plt.tight_layout()
+        # Save
+        fig.savefig(os.path.join(out_port, "portfolio_equity.png"), bbox_inches="tight")
+        fig.savefig(os.path.join(out_port, "portfolio_equity@2x.png"), bbox_inches="tight", dpi=240)
         plt.close(fig)
-        print("Portfolio equity saved")
+        print("Portfolio equity (normalized) & drawdown chart saved")
+
         # Prepare a combined DataFrame for portfolio (for stats computation)
         cummax = port_equity.cummax()
         raw_dd = (cummax - port_equity) / cummax
@@ -579,7 +664,10 @@ def run_statistical_tests(instruments: list, weights: list, symbol_counts: Count
             strat_mod = import_module(f"backtester.strategies.{inst['strategy']['module']}")
             strat_fn = getattr(strat_mod, inst['strategy']['function'])
             best_params['capital'] = total_capital * w  # allocate capital fraction to this instrument
-            pos = strat_fn(df_price, **best_params)['position']
+
+            safe_best_params = filter_params_for_callable(strat_fn, best_params)
+
+            pos = strat_fn(df_price, **safe_best_params)['position']
             df_price['position'] = pos.values if hasattr(pos, 'values') else pos
             # 6d. Define a helper to compute total return for any given subset of price data
             inst_cap = total_capital * w
@@ -749,6 +837,12 @@ def main():
     logging.basicConfig(level=getattr(logging, args.log))
     cfg = load_config(args.config)
 
+    output_cfg = cfg.get('output', {}) or {}
+    save_per_instrument = bool(output_cfg.get('save_per_instrument', True))
+    save_per_strategy = bool(output_cfg.get('save_per_strategy', True))
+    plot_per_strategy = bool((output_cfg.get('plots', {}) or {}).get('per_strategy', True))
+    strategy_inputs = []  # feed to aggregate_by_strategy at the end
+
     TIMEFRAME_ALIASES = {
         "d": "1d", "1d": "1d", "daily": "1d",
         "h": "1h", "1h": "1h", "hour": "1h",
@@ -839,20 +933,74 @@ def main():
         name, combined, stats = run_backtest_for_instrument(
             inst, cfg, portfolio_cfg, fees_map, w, total_capital, save_per_asset,
             run_out, symbol_counts,
-            base_ccy, symbol_ccy_map, fx_dir, cfg['data']['timeframe'], multipliers
+            base_ccy, symbol_ccy_map, fx_dir, cfg['data']['timeframe'], multipliers,
+            save_per_instrument=save_per_instrument,
+            strategy_inputs=strategy_inputs
         )
         instrument_names.append(name)
         per_inst_results.append(combined)
         if stats is not None:
             inst_stats[name] = stats
 
+    if save_per_strategy and strategy_inputs:
+        aggregate_by_strategy(
+            instrument_runs=strategy_inputs,
+            out_root=run_out,
+            make_plots=plot_per_strategy
+        )
+
     # Aggregate all instrument results into portfolio results
     port_equity, port_rets, portfolio_stats = aggregate_portfolio(per_inst_results, instruments, instrument_names, symbol_counts, total_capital, run_out, portfolio_cfg, cfg)
     inst_stats["Portfolio"] = portfolio_stats
 
-    # Save combined statistics for all instruments and the portfolio
-    combined_stats_df = pd.DataFrame.from_dict(inst_stats, orient='index')
-    combined_stats_path = os.path.join(run_out, 'combined_stats.csv')
+    # --- Build combined_stats.csv robustly (preserve all fields, incl. 30d metrics) ---
+    rows = []
+    for name, stats in inst_stats.items():
+        # normalize to plain dict
+        stats = stats.to_dict() if hasattr(stats, "to_dict") else dict(stats)
+        row = {"name": name}
+        row.update(stats)
+        rows.append(row)
+
+    combined_stats_df = pd.DataFrame(rows).set_index("name")
+
+    # Optional: keep a preferred order, then append any extras automatically
+    BASE_COLS = [
+        "cagr", "annual_vol", "sharpe", "sortino",
+        "max_drawdown", "avg_drawdown", "avg_dd_duration",
+        "profit_factor", "expectancy", "win_rate",
+        "std_daily", "ret_5pct", "ret_95pct",
+        "avg_win", "avg_loss", "max_loss_pct",
+    ]
+    EXTRA_30D = [
+        "avg_30d_ret",
+        "avg_30d_ret_plus_2std",
+        "avg_30d_ret_minus_2std",
+        "avg_30d_ret_ci_low",
+        "avg_30d_ret_ci_high",
+    ]
+    ordered = [c for c in BASE_COLS if c in combined_stats_df.columns] \
+              + [c for c in EXTRA_30D if c in combined_stats_df.columns] \
+              + [c for c in combined_stats_df.columns if c not in set(BASE_COLS + EXTRA_30D)]
+    combined_stats_df = combined_stats_df[ordered]
+
+    # --- insert this block here ---
+    for col in EXTRA_30D:
+        if col not in combined_stats_df.columns:
+            combined_stats_df[col] = np.nan
+    if "Portfolio" in combined_stats_df.index:
+        combined_stats_df.loc["Portfolio", EXTRA_30D] = [
+            portfolio_stats.get(k, np.nan) for k in EXTRA_30D
+        ]
+    # ------------------------------
+
+    # logging.info("combined_stats cols: %s", combined_stats_df.columns.tolist())
+    # logging.info(
+    #     "Portfolio row 30d: %s",
+    #     combined_stats_df.loc["Portfolio", [c for c in combined_stats_df.columns if "30d" in c]].to_dict()
+    # )
+
+    combined_stats_path = os.path.join(run_out, "combined_stats.csv")
     combined_stats_df.to_csv(combined_stats_path)
     print(f"✅ combined_stats.csv created → {combined_stats_path}")
 
@@ -930,8 +1078,8 @@ def main():
     expectancy = total_pnl.sum() / trades if trades > 0 else np.nan
     win_rate = total_pnl.gt(0).sum() / trades if trades > 0 else np.nan
 
-    # Update the Portfolio row in combined stats with these metrics and save again
-    combined_stats_df.loc['Portfolio'] = {
+    # Only overwrite the fields you recompute here; preserve any others already present
+    _update = {
         'cagr': cagr,
         'annual_vol': ann_vol,
         'sharpe': sharpe,
@@ -942,10 +1090,20 @@ def main():
         'profit_factor': profit_factor,
         'expectancy': expectancy,
         'win_rate': win_rate,
-        'std_daily': rets.std()
+        'std_daily': rets.std(),
     }
+
+    if 'Portfolio' in combined_stats_df.index:
+        for k, v in _update.items():
+            combined_stats_df.loc['Portfolio', k] = v
+    else:
+        # If somehow missing, create the row with NaNs then set the known fields
+        combined_stats_df.loc['Portfolio'] = np.nan
+        for k, v in _update.items():
+            combined_stats_df.loc['Portfolio', k] = v
+
     combined_stats_df.to_csv(combined_stats_path)
-    print("✅ combined_stats.csv updated with final Portfolio stats")
+    print("✅ combined_stats.csv updated with final Portfolio stats (fields merged, 30d metrics preserved)")
 
     # Generate Markdown summary report
     generate_summary_md(run_out, cfg, portfolio_cfg, save_per_asset, instruments)

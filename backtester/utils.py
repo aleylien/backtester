@@ -4,6 +4,20 @@ from backtester.pnl_engine import simulate_pnl
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+from inspect import signature
+
+
+def filter_params_for_callable(func, params: dict) -> dict:
+    """Keep only kwargs the function can accept (unless it has **kwargs)."""
+    try:
+        sig = signature(func)
+    except (ValueError, TypeError):
+        return dict(params)
+    # If function has **kwargs, no need to filter
+    if any(p.kind == p.VAR_KEYWORD for p in sig.parameters.values()):
+        return dict(params)
+    allowed = set(sig.parameters.keys())
+    return {k: v for k, v in params.items() if k in allowed}
 
 
 def run_strategy(df: pd.DataFrame, config: dict, **params) -> dict:
@@ -80,6 +94,96 @@ def get_periods_per_year(tf: str) -> float:
     return 252  # default fallback
 
 
+def thirty_day_stats_from_returns(oos_full: pd.DataFrame, lookback: int = 30):
+    """
+    Compute overlapping 30-bar compounded returns from *daily returns* derived from equity.
+    Input df must contain at least 'equity'; optional: 'sample', 'bundle'.
+    - If 'sample' present, we filter to OOS.
+    - If 'bundle' present, 30-bar windows are computed within each bundle (no crossing).
+    Returns dict with mean, mean ± 2σ, and a naive 95% CI (fractions; multiply by 100 when saving as %).
+    """
+    if oos_full is None or len(oos_full) == 0:
+        return {k: np.nan for k in (
+            "avg_30d_ret","avg_30d_ret_plus_2std","avg_30d_ret_minus_2std",
+            "avg_30d_ret_ci_low","avg_30d_ret_ci_high"
+        )}
+
+    df = oos_full.copy()
+
+    # Ensure we have an equity column
+    if 'equity' not in df.columns:
+        # if df itself is a Series of equity, convert it
+        if isinstance(df, pd.Series):
+            df = df.to_frame(name='equity')
+        else:
+            return {k: np.nan for k in (
+                "avg_30d_ret","avg_30d_ret_plus_2std","avg_30d_ret_minus_2std",
+                "avg_30d_ret_ci_low","avg_30d_ret_ci_high"
+            )}
+
+    # Normalize a datetime index (handle 'date' as column or as index name)
+    if 'date' in df.columns:
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        df = df.set_index('date')
+    else:
+        # use existing index
+        df.index = pd.to_datetime(df.index, errors='coerce')
+    df = df.sort_index()
+    df.index.name = 'date'
+
+    # OOS only (if provided)
+    if 'sample' in df.columns:
+        df = df[df['sample'] == 'OOS']
+
+    # Clean equity to numeric
+    eq = pd.to_numeric(df['equity'], errors='coerce').replace([np.inf, -np.inf], np.nan)
+
+    # Need enough points
+    if eq.dropna().size < lookback + 1:
+        return {k: np.nan for k in (
+            "avg_30d_ret","avg_30d_ret_plus_2std","avg_30d_ret_minus_2std",
+            "avg_30d_ret_ci_low","avg_30d_ret_ci_high"
+        )}
+
+    # Daily simple returns from equity (per bundle if available)
+    if 'bundle' in df.columns:
+        # align bundle labels with eq index
+        bundles = df.loc[eq.index, 'bundle']
+        r1 = eq.groupby(bundles).pct_change()
+        # 30-bar compounded returns within bundle
+        r30 = (
+            (1.0 + r1)
+            .groupby(bundles)
+            .rolling(lookback, min_periods=lookback)
+            .apply(np.prod, raw=True)
+            .reset_index(level=0, drop=True) - 1.0
+        )
+    else:
+        r1 = eq.pct_change()
+        r30 = (1.0 + r1).rolling(lookback, min_periods=lookback).apply(np.prod, raw=True) - 1.0
+
+    r30 = pd.to_numeric(r30, errors='coerce').replace([np.inf, -np.inf], np.nan).dropna()
+    n = int(r30.size)
+    if n == 0:
+        return {k: np.nan for k in (
+            "avg_30d_ret","avg_30d_ret_plus_2std","avg_30d_ret_minus_2std",
+            "avg_30d_ret_ci_low","avg_30d_ret_ci_high"
+        )}
+
+    mean_pm = float(r30.mean())
+    std_pm  = float(r30.std(ddof=1))
+    ci_half = 1.96 * std_pm / np.sqrt(n)
+
+    return {
+        "avg_30d_ret": mean_pm,
+        "avg_30d_ret_plus_2std":  mean_pm + 2.0 * std_pm,
+        "avg_30d_ret_minus_2std": mean_pm - 2.0 * std_pm,
+        "avg_30d_ret_ci_low":     mean_pm - ci_half,
+        "avg_30d_ret_ci_high":    mean_pm + ci_half,
+    }
+
+
+
 def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None) -> dict:
     """
     From the combined diagnostics DataFrame:
@@ -122,6 +226,28 @@ def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None
         sharpe = (ret.mean() / ret.std() * np.sqrt(periods)) if ret.std() > 0 else np.nan
         neg = ret[ret < 0]
         sortino = (ret.mean() / neg.std() * np.sqrt(periods)) if len(neg) > 0 else np.nan
+
+        # 30-day return
+        # robust overlapping 30-bar returns + CI
+        eq_ser = pd.Series(eq['equity'] if isinstance(eq, pd.DataFrame) else eq)
+        eq_ser.index = pd.to_datetime(eq_ser.index)
+        eq_ser = pd.to_numeric(eq_ser, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+        eq_ser = eq_ser.sort_index()
+
+        # need at least lookback+1 points for any return
+        lookback = 30
+        port_monthly = eq_ser.pct_change(lookback)
+        port_monthly = pd.to_numeric(port_monthly, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+
+        n = int(port_monthly.size)
+        if n > 0:
+            mean_pm = float(port_monthly.mean())
+            std_pm = float(port_monthly.std(ddof=1))
+            ci_half = 1.96 * std_pm / np.sqrt(n)
+            ci_low = mean_pm - ci_half
+            ci_high = mean_pm + ci_half
+        else:
+            mean_pm = std_pm = ci_low = ci_high = np.nan  # or 0.0 if you prefer
 
         # Drawdown metrics (unchanged)
         dd_vals = grp['drawdown'].dropna()
@@ -200,6 +326,7 @@ def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None
 
         print(
             f"Bundle {b}: CAGR={cagr:.2%}, Vol={ann_vol:.2%}, Sharpe={sharpe:.2f}, "
+            f" Mean 30-d return={mean_pm:.2%}, +2std={ci_high:.2%}, -2std={ci_low:.2%}, "
             f"Sortino={sortino:.2f}, MaxDD={max_dd:.2%}, AvgDD={avg_dd:.2%}, "
             f"AvgDDdur={avg_dd_dur:.1f}, PF={profit_factor:.2f}, Exp={expectancy:.2f}, "
             f"WR={win_rate:.1%}, Std={std_dev:.4f}, 5%={tail_5:.2%}, 95%={tail_95:.2%}"
@@ -220,6 +347,7 @@ def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None
 
     max_dd_a = oos_full['drawdown'].max()
     avg_dd_a = oos_full['drawdown'][oos_full['drawdown'] > 0].mean()
+
     # Aggregate avg drawdown duration (same logic as per-bundle)
     dur_list = []
     for _, grp in oos_full.groupby('bundle'):
@@ -252,11 +380,25 @@ def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None
     avg_loss_a = all_rets[all_rets < 0].mean() if len(all_rets[all_rets < 0]) > 0 else 0.0
     max_loss_bar_a = all_rets.min() if len(all_rets) > 0 else 0.0
 
+    # 30 day returns
+    stats_30 = thirty_day_stats_from_returns(oos_full, lookback=30)
+    avg_30d_ret = stats_30["avg_30d_ret"]
+    avg_30d_ret_plus_2std = stats_30["avg_30d_ret_plus_2std"]
+    avg_30d_ret_minus_2std = stats_30["avg_30d_ret_minus_2std"]
+    avg_30d_ret_ci_low = stats_30["avg_30d_ret_ci_low"]
+    avg_30d_ret_ci_high = stats_30["avg_30d_ret_ci_high"]
+    print(f"30d stats: {avg_30d_ret, avg_30d_ret_minus_2std, avg_30d_ret_plus_2std, avg_30d_ret_ci_low, avg_30d_ret_ci_high}")
+
     agg_stats = {
         'cagr': cagr_a,
         'annual_vol': ann_vol_a,
         'sharpe': sharpe_a,
         'sortino': sortino_a,
+        "avg_30d_ret": avg_30d_ret,
+        "avg_30d_ret_plus_2std": avg_30d_ret_plus_2std,
+        "avg_30d_ret_minus_2std": avg_30d_ret_minus_2std,
+        "avg_30d_ret_ci_low": avg_30d_ret_ci_low,
+        "avg_30d_ret_ci_high": avg_30d_ret_ci_high,
         'max_drawdown': max_dd_a,
         'avg_drawdown': avg_dd_a,
         'avg_dd_duration': avg_dd_dur_a,

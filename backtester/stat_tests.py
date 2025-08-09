@@ -4,6 +4,7 @@ import pandas as pd
 from typing import Dict, Callable
 from backtester.data_loader import DataLoader
 from backtester.backtest import run_backtest
+from backtester.utils import filter_params_for_callable  # or local helper
 
 
 np.random.seed(42)
@@ -73,7 +74,8 @@ def test1_permutation_oos(inst_cfg: dict, inst_folder: str, w, B: int = 1000) ->
 
             params['capital'] = inst_cfg['portfolio']['capital'] * w
 
-            pos_df = strat_fn(df_perm, **params)
+            safe_params = filter_params_for_callable(strat_fn, params)
+            pos_df = strat_fn(df_perm, **safe_params)
             # Simulate PnL for this OOS segment
             if 'position' in pos_df:
                 # Compute pnl as price diff * prev position * multiplier * fx (similar to simulate_pnl logic, but simpler for test)
