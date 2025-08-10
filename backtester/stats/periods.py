@@ -17,6 +17,15 @@ class PeriodStats:
     ret_over_vol: float
 
 
+def _resample_rule(resolution: str) -> str:
+    # Use new pandas aliases: ME=month end, QE=quarter end (calendar-year anchored)
+    if resolution == "monthly":
+        return "ME"
+    if resolution == "quarterly":
+        return "QE"
+    raise ValueError("resolution must be 'monthly' or 'quarterly'")
+
+
 def _dd(series: pd.Series) -> float:
     """Max drawdown from a cumulative index series."""
     if series.empty:
@@ -32,7 +41,7 @@ def _periodize(returns: pd.Series, resolution: str) -> pd.core.groupby.SeriesGro
     returns: daily (or finer) arithmetic returns indexed by datetime
     """
     if resolution == "monthly":
-        rule = "M"
+        rule = "ME"
     elif resolution == "quarterly":
         rule = "Q"
     else:

@@ -27,7 +27,7 @@ def run_strategy(df: pd.DataFrame, config: dict, **params) -> dict:
     # 1) Dynamically import the strategy module and function
     mod_name  = config['strategy']['module']
     fn_name   = config['strategy']['function']
-    strat_mod = import_module(f"backtester.strategies.{mod_name}")
+    strat_mod = import_module(f"strategies.{mod_name}")
     strat_fn  = getattr(strat_mod, fn_name)
 
     # 2) Prepare parameters for the strategy function, dropping any internal keys
@@ -209,6 +209,66 @@ def thirty_day_stats_from_returns(oos_full: pd.DataFrame, lookback: int = 30):
     }
 
 
+def _estimate_trading_days_per_year(idx: pd.DatetimeIndex, min_months: int = 9) -> int:
+    """
+    Estimate trading days per year from timestamps:
+      - counts unique dates with data
+      - drops partial years (< min_months of data) to avoid bias
+      - returns the median across valid years
+    Works for daily or intraday (intraday still has 1 unique date per trading day).
+    """
+    if not isinstance(idx, pd.DatetimeIndex):
+        idx = pd.to_datetime(idx, errors="coerce")
+    idx = idx.dropna()
+    if idx.size == 0:
+        return 252
+
+    days = pd.DatetimeIndex(idx.normalize())
+    # unique trading dates per year
+    td_per_year = pd.Series(days).groupby(days.year).nunique()
+
+    # months covered per year (to filter partial years)
+    months = pd.PeriodIndex(days, freq="M")
+    months_per_year = pd.Series(months).groupby(months.year).nunique()
+
+    valid_years = months_per_year[months_per_year >= min_months].index
+    if len(valid_years) == 0:
+        # fall back to all years
+        est = int(round(td_per_year.median()))
+    else:
+        est = int(round(td_per_year.loc[valid_years].median()))
+
+    # sanity: detect weekend trading (e.g., crypto) – if most unique days include weekends, bump toward 365
+    unique_days = pd.DatetimeIndex(days.unique())
+    if len(unique_days) == 0:
+        wkend_frac = 0.0
+    else:
+        # DatetimeIndex has .dayofweek (Mon=0 ... Sun=6)
+        wkend_frac = float(np.mean(unique_days.dayofweek >= 5))
+    if wkend_frac > 0.2 and est < 300:
+        # many weekend days present → likely 365-ish market
+        est = max(est, 360)
+    return max(1, est)
+
+
+def _estimate_ppy_from_index(idx: pd.DatetimeIndex) -> int:
+    """
+    Periods-per-year (PPY) for *this series*, including intraday.
+    PPY = trading_days_per_year * median(bars per trading day).
+    """
+    if not isinstance(idx, pd.DatetimeIndex):
+        idx = pd.to_datetime(idx, errors="coerce")
+    idx = idx.dropna()
+    if idx.size == 0:
+        return 252
+
+    tdy = _estimate_trading_days_per_year(idx)
+    # bars per trading day (robust median)
+    groups = pd.Series(1, index=idx).groupby(idx.normalize()).sum()
+    bpd = int(max(1, float(groups.median())))
+    return int(tdy * bpd)
+
+
 def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None) -> dict:
     """
     From the combined diagnostics DataFrame:
@@ -373,6 +433,62 @@ def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None
     max_dd_a = oos_full['drawdown'].max()
     avg_dd_a = oos_full['drawdown'][oos_full['drawdown'] > 0].mean()
 
+    # Annualised return
+    # ---- Plain annualised return from mean period return (handles intraday) ----
+    r = pd.to_numeric(all_rets, errors="coerce").dropna()
+    if not isinstance(r.index, pd.DatetimeIndex):
+        r.index = pd.to_datetime(r.index, errors="coerce")
+        r = r.dropna()
+
+    r = pd.to_numeric(all_rets, errors="coerce").dropna()
+    if not isinstance(r.index, pd.DatetimeIndex):
+        r.index = pd.to_datetime(r.index, errors="coerce")
+        r = r.dropna()
+
+    ppy = _estimate_ppy_from_index(r.index)  # ✅ auto-detects trading days & intraday bars
+    annualised_return_plain = float((1.0 + r.mean()) ** ppy - 1.0)
+    annualised_return_log = float(np.expm1(np.log1p(r).mean() * ppy))
+
+    def _compute_oos_total_return(combined: pd.DataFrame) -> float:
+        """
+        Total compounded return across the OOS sample.
+        Prefers 'equity' (end/start - 1). Falls back to product(1+returns)-1.
+        Returns NaN if neither is available.
+        """
+        df = combined.copy()
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            df = df.sort_values("date")
+
+        # focus on OOS; if no 'sample' column, just use everything
+        if "sample" in df.columns:
+            oos = df[df["sample"].astype(str).str.upper() == "OOS"]
+        else:
+            oos = df
+
+        if oos.empty:
+            return float("nan")
+
+        # 1) equity-based (most robust)
+        if "equity" in oos.columns and oos["equity"].notna().any():
+            eq = pd.to_numeric(oos["equity"], errors="coerce").dropna()
+            if not eq.empty and float(eq.iloc[0]) != 0:
+                return float(eq.iloc[-1] / eq.iloc[0] - 1.0)
+
+        # 2) returns-based
+        if "returns" in oos.columns and oos["returns"].notna().any():
+            r = pd.to_numeric(oos["returns"], errors="coerce").dropna()
+            if not r.empty:
+                return float((1.0 + r).prod() - 1.0)
+
+        return float("nan")
+    # ---- Total OOS % Return (compounded) ----
+    try:
+        total_oos_return = _compute_oos_total_return(combined)
+    except Exception:
+        total_oos_return = float("nan")
+
+
     # Aggregate avg drawdown duration (same logic as per-bundle)
     dur_list = []
     for _, grp in oos_full.groupby('bundle'):
@@ -416,6 +532,9 @@ def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None
 
     agg_stats = {
         'cagr': cagr_a,
+        'annualised_return_plain': annualised_return_plain,
+        'annualised_return_log': annualised_return_log,
+        'total_return': total_oos_return,
         'annual_vol': ann_vol_a,
         'sharpe': sharpe_a,
         'sortino': sortino_a,
@@ -458,8 +577,9 @@ def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None
         all_gross = pd.concat(gross_list)
         if all_gross.std()>0:
             sharpe_no_cost = (all_gross.mean()/all_gross.std()*np.sqrt(periods))
-    if not np.isnan(avg_cost_frac):   agg_stats['avg_cost_pct']=avg_cost_frac
-    if not np.isnan(sharpe_no_cost): agg_stats['sharpe_no_cost']=sharpe_no_cost
+            cost_sharp = sharpe_no_cost - agg_stats['sharpe']
+    if not np.isnan(avg_cost_frac):  agg_stats['avg_cost_pct']=avg_cost_frac
+    if not np.isnan(sharpe_no_cost): agg_stats['cost_sharp']=cost_sharp
 
     # --- Charts ---
     # drawdown distribution

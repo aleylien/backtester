@@ -1,108 +1,89 @@
-# backtester/strategies/idm.py
 from __future__ import annotations
 import numpy as np
 import pandas as pd
-from typing import Dict, Iterable
+from typing import Dict, List
+from backtester.data_loader import DataLoader
 
 
-def _effective_corr_mat(df: pd.DataFrame, floor_negatives: bool) -> pd.DataFrame:
-    rho = df.corr(min_periods=1)  # pairwise, handles NaNs
+def _corr_idm(returns: pd.DataFrame, weights: pd.Series, floor_negatives: bool, min_overlap: int, fallback: float) -> float:
+    if returns.shape[1] <= 1:
+        return 1.0
+    # Require overlap
+    count = returns.notna().astype(int).T @ returns.notna().astype(int)
+    ok = (count.values >= min_overlap)
+    np.fill_diagonal(ok, True)
+    if not ok.all():
+        return float(fallback)
+
+    rho = returns.corr(min_periods=min_overlap)
     if floor_negatives:
         rho = rho.clip(lower=0.0)
-    # Fill diag with 1.0 (robustness)
     np.fill_diagonal(rho.values, 1.0)
-    return rho
 
-
-def _overlap_mask(df: pd.DataFrame, min_overlap: int) -> bool:
-    # True if every pair has >= min_overlap overlapping obs
-    n = df.shape[1]
-    count = df.notna().astype(int).T @ df.notna().astype(int)
-    # count_ij is #overlapping non-NaN rows for pair (i,j)
-    # Require off-diagonals >= min_overlap
-    ok = (count.values >= min_overlap)
-    # Ignore diagonal
-    np.fill_diagonal(ok, True)
-    return bool(ok.all())
-
-
-def compute_idm_static(
-    returns_by_instrument: Dict[str, pd.Series],
-    weights: Dict[str, float] | pd.Series | Iterable[float],
-    *,
-    floor_negatives: bool = True,
-    min_overlap: int = 60,
-    fallback: float = 1.0,
-) -> float:
-    """
-    IDM = 1 / sqrt(w^T ρ w), using per-instrument OOS daily returns.
-    returns_by_instrument: dict of {symbol: daily arithmetic returns (DatetimeIndex)}
-    weights: dict/series/list aligned by instrument keys order.
-    """
-    if not returns_by_instrument:
-        return float(fallback)
-
-    df = pd.DataFrame(returns_by_instrument).astype(float)
-    if df.shape[1] == 1:
-        return 1.0
-
-    if not _overlap_mask(df, min_overlap=min_overlap):
-        return float(fallback)
-
-    w = pd.Series(weights, index=df.columns, dtype=float)
-    if w.isna().any():
-        w = w.fillna(0.0)
-    # Normalize weights to sum 1 (only relative matters here)
-    if w.sum() != 0:
-        w = w / w.sum()
-    else:
-        w = pd.Series(1.0 / len(w), index=w.index)
-
-    rho = _effective_corr_mat(df, floor_negatives=floor_negatives)
+    w = weights.copy().astype(float)
+    s = w.sum()
+    w = (w / s) if s != 0 else pd.Series(1.0 / len(w), index=w.index)
     quad = float(np.dot(w.values, np.dot(rho.values, w.values)))
-    if quad <= 0 or not np.isfinite(quad):
+    if not np.isfinite(quad) or quad <= 0:
         return float(fallback)
     return float(1.0 / np.sqrt(quad))
 
 
-def compute_idm_rolling(
-    returns_by_instrument: Dict[str, pd.Series],
-    weights: Dict[str, float] | pd.Series | Iterable[float],
-    *,
-    window: int = 250,
-    floor_negatives: bool = True,
-    min_overlap: int = 60,
-    fallback: float = 1.0,
-) -> pd.Series:
+def compute_idm_map(cfg: dict, instruments: List[dict]) -> Dict[str, float]:
     """
-    Rolling IDM as a time series (indexed like the union of input returns).
+    Returns {strategy_module: idm_scalar}. Uses close-price returns for symbols that use the same strategy.
+    Config keys (optional):
+    cfg['idm'] = {
+        'enabled': true,
+        'mode': 'static',      # only static here; rolling can be added later
+        'floor_negatives': true,
+        'min_overlap': 60,
+        'window': 250,         # lookback in bars (on cfg['data'].timeframe)
+        'returns_freq': 'daily', # daily | weekly (weekly does .resample('W-FRI').last().pct_change())
+        'fallback': 1.0
+    }
+    If cfg['idm']['enabled'] is false or missing, returns {} and you should pass the scalar from YAML.
     """
-    if not returns_by_instrument:
-        return pd.Series(dtype=float)
+    idm_cfg = (cfg.get('idm') or {})
+    if not idm_cfg.get('enabled', False):
+        return {}
 
-    df = pd.DataFrame(returns_by_instrument).astype(float).sort_index()
-    if df.shape[1] == 1:
-        return pd.Series(1.0, index=df.index)
+    floor_neg = bool(idm_cfg.get('floor_negatives', True))
+    min_overlap = int(idm_cfg.get('min_overlap', 60))
+    window = int(idm_cfg.get('window', 250))
+    freq = str(idm_cfg.get('returns_freq', 'daily')).lower()
+    fallback = float(idm_cfg.get('fallback', 1.0))
 
-    w = pd.Series(weights, index=df.columns, dtype=float)
-    if w.sum() != 0:
-        w = w / w.sum()
-    else:
-        w = pd.Series(1.0 / len(w), index=w.index)
+    # Group symbols by strategy
+    by_strat: Dict[str, List[str]] = {}
+    for inst in instruments:
+        by_strat.setdefault(inst['strategy']['module'], []).append(inst['symbol'])
 
-    out = []
-    idx = []
-    roll = df.rolling(window=window, min_periods=min_overlap)
-    for t, sub in roll:
-        if sub.shape[0] < min_overlap or sub.dropna(how="all").shape[1] < 2:
-            idm_t = fallback
-        else:
-            if not _overlap_mask(sub, min_overlap=min_overlap):
-                idm_t = fallback
-            else:
-                rho = _effective_corr_mat(sub, floor_negatives=floor_negatives)
-                quad = float(np.dot(w.values, np.dot(rho.values, w.values)))
-                idm_t = fallback if quad <= 0 or not np.isfinite(quad) else 1.0 / np.sqrt(quad)
-        out.append(idm_t)
-        idx.append(t)
-    return pd.Series(out, index=idx).reindex(df.index).ffill().fillna(fallback)
+    out: Dict[str, float] = {}
+    for strat, symbols in by_strat.items():
+        # Load closes for all symbols with this strategy
+        rets_cols = {}
+        for sym in symbols:
+            inst_cfg = dict(cfg)  # shallow safe
+            # Load per-symbol data with repo's DataLoader
+            dl = DataLoader(
+                data_dir=cfg['data']['path'],
+                symbol=sym,
+                timeframe=cfg['data']['timeframe'],
+                base_timeframe=cfg['data'].get('base_timeframe')
+            )
+            df = dl.load().copy()
+            if df.empty:
+                continue
+            ser = df['close'].copy()
+            ser.index = pd.to_datetime(ser.index)
+            if freq.startswith('week'):
+                ser = ser.resample('W-FRI').last()
+            rets_cols[sym] = ser.pct_change()
+        if not rets_cols:
+            out[strat] = fallback
+            continue
+        R = pd.DataFrame(rets_cols).sort_index().tail(window)
+        w = pd.Series(1.0, index=list(rets_cols.keys()))
+        out[strat] = _corr_idm(R, w, floor_neg, min_overlap, fallback)
+    return out

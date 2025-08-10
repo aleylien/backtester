@@ -1,135 +1,133 @@
 from __future__ import annotations
 import pandas as pd
-from typing import Dict
+from typing import Dict, Tuple, List
 
 
-def _period_ends(idx: pd.DatetimeIndex, freq: str) -> pd.DatetimeIndex:
+def _period_bounds(index: pd.DatetimeIndex, freq: str) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
     if freq == "weekly":
-        # last business day of each week: resample W-FRI
-        return idx.to_series().resample("W-FRI").last().dropna().index.intersection(idx)
+        ends = index.to_series().resample("W-FRI").last().dropna()
     elif freq == "monthly":
-        return idx.to_series().resample("M").last().dropna().index.intersection(idx)
-    elif freq in {"quarterly", "3M"}:
-        return idx.to_series().resample("Q").last().dropna().index.intersection(idx)
+        ends = index.to_series().resample("ME").last().dropna()   # was "M"
+    elif freq in {"quarterly", "3m"}:
+        ends = index.to_series().resample("QE").last().dropna()   # was "Q"
     else:
         raise ValueError("freq must be weekly|monthly|quarterly")
+    bounds = []
+    start = index[0]
+    for dt in ends.index:
+        if dt < start:
+            continue
+        bounds.append((start, dt))
+        nxtpos = index.get_indexer([dt], method="backfill")[0] + 1
+        if nxtpos < len(index):
+            start = index[nxtpos]
+        else:
+            start = None
+            break
+    if start is not None and start <= index[-1]:
+        bounds.append((start, index[-1]))
+    # dedupe
+    out = []
+    for a, b in bounds:
+        if out and out[-1][1] == b:
+            continue
+        out.append((a, b))
+    return out
 
-def apply_compounding_and_rebalancing(
-    per_symbol_positions: Dict[str, pd.Series],
-    per_symbol_prices: Dict[str, pd.Series],
-    *,
-    initial_capital: float,
-    target_weights: Dict[str, float],
-    policy_mode: str = "none",            # "none" | "reinvesting" | "periodic_rebalance"
+
+def scale_pnl_with_policy(
+    pnl_by_symbol: Dict[str, pd.Series],
+    weights: Dict[str, float],
+    initial_total_capital: float,
+    mode: str = "none",                   # "none" | "reinvesting" | "periodic_rebalance"
     reinvesting_frequency: str = "monthly",
     rebalance_frequency: str = "quarterly",
-    contract_multiplier: Dict[str, float] | None = None,
-    fx: Dict[str, float] | None = None,
-    costs_per_unit: Dict[str, float] | None = None,
-) -> Dict[str, pd.Series]:
+) -> Tuple[pd.Series, Dict[str, pd.Series]]:
     """
-    Returns dict with:
-      - 'equity_portfolio': portfolio equity series
-      - 'equity_by_symbol': dict of per-symbol equity
-      - 'positions_scaled': dict of positions after scaling/rebalance
-    Notes:
-      * positions are assumed to be integer contract counts over time (or floats).
-      * prices are the traded price aligned to the same index.
-      * PnL is approximated by position[t-1] * (price[t]-price[t-1]) * multiplier * fx
-      * Transaction costs are approximated by |Δposition| * cost_per_unit (if provided).
+    Returns (portfolio_equity, scaled_pnl_by_symbol)
+    - 'none': no scaling; just sum pnl across symbols → equity = cumsum + initial_total_capital
+    - 'reinvesting': at each period end, multiply ALL future pnl by same factor so portfolio equity compounds
+    - 'periodic_rebalance': at each period end, set each sleeve's equity to target weight of total, by scaling FUTURE pnl per symbol
     """
-    symbols = list(per_symbol_positions.keys())
-    # Align everything to common index
+    # Align indices
     idx = None
-    for s in symbols:
-        idx = per_symbol_prices[s].index if idx is None else idx.union(per_symbol_prices[s].index)
+    for s, ser in pnl_by_symbol.items():
+        ser.index = pd.to_datetime(ser.index)
+        idx = ser.index if idx is None else idx.union(ser.index)
     idx = idx.sort_values()
-
-    # Defaults
-    contract_multiplier = contract_multiplier or {s: 1.0 for s in symbols}
-    fx = fx or {s: 1.0 for s in symbols}
-    costs_per_unit = costs_per_unit or {s: 0.0 for s in symbols}
-
-    # Reindex and ffill positions, prices
-    pos = {s: per_symbol_positions[s].reindex(idx).ffill().fillna(0.0) for s in symbols}
-    px = {s: per_symbol_prices[s].reindex(idx).ffill().dropna() for s in symbols}
-    idx = px[symbols[0]].index  # after ffill
-
-    # Per-symbol equity tracking
-    eq = {s: pd.Series(0.0, index=idx, dtype=float) for s in symbols}
-    eq_curr = {s: initial_capital * float(target_weights.get(s, 0.0)) for s in symbols}
-    pos_scaled = {s: pos[s].copy() for s in symbols}
-
-    # Period boundaries
-    if policy_mode == "reinvesting":
-        period_ends = _period_ends(idx, reinvesting_frequency)
-    elif policy_mode == "periodic_rebalance":
-        period_ends = _period_ends(idx, rebalance_frequency)
+    pnl = {s: pnl_by_symbol[s].reindex(idx).fillna(0.0).astype(float) for s in pnl_by_symbol}
+    symbols = list(pnl.keys())
+    # initial per-symbol capital from target weights
+    w = pd.Series(weights, index=symbols, dtype=float)
+    if w.sum() == 0:
+        w[:] = 1.0 / len(w)
     else:
-        period_ends = pd.DatetimeIndex([])
+        w /= w.sum()
+    cap0 = {s: float(initial_total_capital * w[s]) for s in symbols}
 
-    # Iterate and simulate pnl; scale at boundaries
-    prev_price = {s: px[s].iloc[0] for s in symbols}
-    prev_pos = {s: float(pos_scaled[s].iloc[0]) for s in symbols}
+    # none: simple sum
+    if mode == "none":
+        port_pnl = sum(pnl.values())
+        eq = port_pnl.cumsum() + initial_total_capital
+        return eq, pnl
 
-    portfolio_equity = []
-    total_equity = sum(eq_curr.values())
-    # initialize day 0
-    for t, dt in enumerate(idx):
-        # PnL for this bar
-        for s in symbols:
-            curr_price = float(px[s].loc[dt])
-            dP = curr_price - float(prev_price[s])
-            pnl_price = prev_pos[s] * dP * float(contract_multiplier.get(s, 1.0)) * float(fx.get(s, 1.0))
-            # simple linear transaction cost
-            dpos = float(pos_scaled[s].loc[dt]) - prev_pos[s]
-            cost = abs(dpos) * float(costs_per_unit.get(s, 0.0))
-            eq_curr[s] += (pnl_price - cost)
-            eq[s].iat[t] = eq_curr[s]
-            prev_pos[s] = float(pos_scaled[s].loc[dt])
-            prev_price[s] = curr_price
+    # piecewise scaling
+    freq = reinvesting_frequency if mode == "reinvesting" else rebalance_frequency
+    bounds = _period_bounds(idx, freq)
+    scaled = {s: pnl[s].copy() for s in symbols}
+    # rolling current equity snapshot at start of period
+    # these track equity WITH scaling applied so far
+    eq_so_far = {s: cap0[s] for s in symbols}
+    eq_port = []
+    out_index = []
 
-        total_equity = sum(eq_curr.values())
-        portfolio_equity.append(total_equity)
+    def total_equity_now(t_idx: int) -> float:
+        # sum of (cap at start + cumsum of scaled pnl up to t_idx)
+        return sum(eq_so_far[s] + scaled[s].iloc[:t_idx+1].cumsum().iloc[-1] for s in symbols)
 
-        # Boundary actions AFTER applying PnL of this bar
-        if dt in period_ends:
-            if policy_mode == "reinvesting":
-                # Scale ALL future positions by same factor so next bar uses bigger capital
-                # factor = current_total / initial_total_of_period
-                # We can compute factor per-symbol to keep current weights (no explicit rebalance)
-                total_now = sum(eq_curr.values())
-                # Keep weights as they are currently (drifted)
+    # iterate periods
+    last_end_pos = -1
+    for (a, b) in bounds:
+        # indices for this slice
+        i0 = idx.get_indexer([a], method="nearest")[0]
+        i1 = idx.get_indexer([b], method="nearest")[0]
+        # append equity path within this slice (before any scaling at its end)
+        slice_equity = []
+        for t in range(i0, i1+1):
+            # build portfolio equity at each bar using scaled pnl so far
+            tot = sum(eq_so_far[s] + scaled[s].iloc[i0:t+1].cumsum().iloc[-1] for s in symbols)
+            slice_equity.append(tot)
+        eq_port.extend(slice_equity)
+        out_index.extend(list(idx[i0:i1+1]))
+
+        # period end action
+        if mode == "reinvesting":
+            # scale ALL future pnl by same factor so that (implicitly) capital grows for next period
+            eq_now = eq_port[-1]
+            eq_start = eq_port[last_end_pos] if last_end_pos >= 0 else initial_total_capital
+            factor = (eq_now / eq_start) if eq_start != 0 else 1.0
+            if i1 + 1 < len(idx):
                 for s in symbols:
-                    # scale by same portfolio factor => maintain drifted weights
-                    # But we need to scale contracts relative to equity change.
-                    # Assume linear in capital; use factor = total_now / last_total_snapshot.
-                    pass  # noop since our loop uses realized eq directly; positions remain as-is.
-                # No explicit change to pos; reinvestment is implicit because subsequent PnL
-                # accrues on larger equity (we don't need to scale contracts here if
-                # strategies are re-run per bundle; if you want explicit growth in contracts,
-                # uncomment the factor-based scaling below.)
+                    scaled[s].iloc[i1+1:] *= factor
+            # advance base equity snapshot to "now" (kept implicitly by scaled pnl)
+            for s in symbols:
+                eq_so_far[s] = eq_so_far[s] + scaled[s].iloc[i0:i1+1].sum()
 
-            if policy_mode == "periodic_rebalance":
-                # Rebalance to target weights by scaling FUTURE positions
-                total_now = sum(eq_curr.values())
+        elif mode == "periodic_rebalance":
+            # compute current per-symbol equity at period end
+            eq_curr = {s: eq_so_far[s] + scaled[s].iloc[i0:i1+1].sum() for s in symbols}
+            total_now = sum(eq_curr.values())
+            if i1 + 1 < len(idx):
                 for s in symbols:
-                    target_cash = float(target_weights.get(s, 0.0)) * total_now
+                    target_cash = float(w[s] * total_now)
                     curr_cash = eq_curr[s]
-                    if curr_cash <= 0 or target_cash <= 0:
-                        continue
-                    scale = target_cash / curr_cash
-                    # multiply FUTURE positions by scale
-                    next_idx = idx.get_indexer([dt], method="backfill")[0] + 1
-                    if next_idx < len(idx):
-                        pos_scaled[s].iloc[next_idx:] *= scale
-                    # book the rebalance immediately by setting eq_curr[s] = target (transaction cost abstracted)
-                    eq_curr[s] = target_cash
-                    # NOTE: if you have an explicit transaction-cost model, apply it here.
+                    if curr_cash > 0:
+                        scale = target_cash / curr_cash
+                        scaled[s].iloc[i1+1:] *= scale
+            # set new base for next period
+            eq_so_far = eq_curr
 
-    equity_portfolio = pd.Series(portfolio_equity, index=idx, name="equity")
-    return {
-        "equity_portfolio": equity_portfolio,
-        "equity_by_symbol": eq,
-        "positions_scaled": pos_scaled,
-    }
+        last_end_pos = i1
+
+    equity_portfolio = pd.Series(eq_port, index=pd.DatetimeIndex(out_index), name="equity")
+    return equity_portfolio, scaled

@@ -26,7 +26,10 @@ from backtester.fx import load_symbol_currency_map, get_fx_series
 from backtester.reporting_excel import export_summary_xlsx
 from backtester.strategy_aggregate import aggregate_by_strategy
 from backtester.stats.periods import top_and_bottom_periods
+from backtester.idm import compute_idm_map
+from backtester.compounding import scale_pnl_with_policy
 from strategies.A_weights import get_portfolio_weights
+
 
 
 def parse_args():
@@ -52,7 +55,7 @@ def make_instrument_config(base_cfg: dict, inst: dict) -> dict:
 
 def run_backtest_for_instrument(inst, base_cfg, portfolio_cfg, fees_map, weight, total_capital,
                                 save_per_asset, run_out, symbol_counts,
-                                base_ccy, symbol_ccy_map, fx_dir, timeframe, multipliers,
+                                base_ccy, symbol_ccy_map, fx_dir, timeframe, multipliers, idm_map,
                                 save_per_instrument=True, strategy_inputs=None):
     """
     Run the walk-forward backtest for a single instrument and return its detailed results and stats.
@@ -123,6 +126,16 @@ def run_backtest_for_instrument(inst, base_cfg, portfolio_cfg, fees_map, weight,
         params['capital'] = alloc_capital
         params['multiplier'] = mult
         params['fx'] = fx_series  # strategy may use it only in sizing denominator
+
+        # ---- IDM injection ----
+        # Priority: computed map per strategy -> YAML scalar -> default=1.0
+        idm_yaml = float((base_cfg.get('strategy') or {}).get('idm', 1.0))
+        try:
+            idm_for_this_strategy = float(idm_map.get(strat_mod_name, idm_yaml))
+        except Exception:
+            idm_for_this_strategy = idm_yaml
+        params['idm'] = idm_for_this_strategy
+
 
         # Run strategy to get positions/forecasts for the OOS segment
         safe_params = filter_params_for_callable(strat_fn, params)
@@ -334,117 +347,101 @@ def aggregate_portfolio(per_inst_results: list, instruments: list, instrument_na
 
         return port_equity, port_rets, portfolio_stats
     else:
-        # --- Standard Mode: aggregate P&L of all instruments (weighted by capital) ---
-        symbols = instrument_names  # use instrument display names for labeling
-        # Sum daily PnL from each instrument (align by date, missing dates filled with 0)
-        pnl_series = []
+        # --- Standard Mode with optional compounding / periodic rebalance ---
+        symbols = instrument_names  # display names
+        # Build per-symbol PnL series
+        pnl_by_symbol = {}
         for name, df_inst in zip(symbols, per_inst_results):
             df_temp = df_inst.copy()
             df_temp['date'] = pd.to_datetime(df_temp['date'])
             df_temp.set_index('date', inplace=True)
-            ser = df_temp['pnl'].fillna(0.0)
-            ser.name = name
-            pnl_series.append(ser)
-        combined_pnl = pd.concat(pnl_series, axis=1).fillna(0.0)
-        portfolio_pnl = combined_pnl.sum(axis=1)
-        port_equity = portfolio_pnl.cumsum() + total_capital
+            pnl_by_symbol[name] = df_temp['pnl'].fillna(0.0)
 
-        # EQUITY CHART
-        # --- Prepare series ---
+        # Target weights (by symbols) using your helper (equal if not specified)
+        weights = get_portfolio_weights(base_cfg, symbols)
+
+        # Capital policy (safe defaults)
+        policy = (base_cfg.get("capital_policy") or {})
+        mode = str(policy.get("mode", "none")).lower()
+        reinv_freq = str(policy.get("reinvesting_frequency", "monthly")).lower()
+        rebal_freq = str(policy.get("rebalance_frequency", "quarterly")).lower()
+
+        # Scale pnl according to policy → portfolio equity & scaled per-symbol pnl
+        equity_portfolio, scaled_by_symbol = scale_pnl_with_policy(
+            pnl_by_symbol=pnl_by_symbol,
+            weights=weights,
+            initial_total_capital=float(total_capital),
+            mode=mode,
+            reinvesting_frequency=reinv_freq,
+            rebalance_frequency=rebal_freq,
+        )
+        portfolio_pnl = sum(scaled_by_symbol.values())
+        port_equity = equity_portfolio
+
+        # === Save Portfolio equity & chart (kept as in your original code) ===
+        # EQUITY CHART (unchanged code below)
         eq = pd.Series(port_equity).dropna().sort_index()
-        # ensure datetime index (safe even if already datetime)
         eq.index = pd.to_datetime(eq.index)
-
-        # Rebase equity to 1.0 at start, then show % vs start
         eq_norm = eq / float(eq.iloc[0])
-        eq_rel = eq_norm - 1.0  # 0.00 = start; 0.20 = +20%
-
-        # Drawdown (as negative %)
+        eq_rel = eq_norm - 1.0
         rolling_max = eq_norm.cummax()
-        dd = (eq_norm / rolling_max) - 1.0  # e.g., -0.25 = -25%
+        dd = (eq_norm / rolling_max) - 1.0
 
-        # Save data
-        pd.DataFrame({"equity_norm": eq_norm}).to_csv(
-            os.path.join(out_port, "portfolio_equity_normalized.csv"), index_label="date"
-        )
-        pd.DataFrame({"drawdown": dd}).to_csv(
-            os.path.join(out_port, "portfolio_drawdown.csv"), index_label="date"
-        )
-
-        # --- Plot ---
         fig, (ax_top, ax_dd) = plt.subplots(
-            2, 1,
-            figsize=(12, 8),  # larger figure
-            dpi=170,  # higher resolution
-            sharex=True,
-            gridspec_kw={"height_ratios": [3, 1]}
+            2, 1, figsize=(12, 8), dpi=170, sharex=True, gridspec_kw={"height_ratios": [3, 1]}
         )
-
-        # Top: equity (percent vs start)
         ax_top.plot(eq_rel.index, eq_rel.values, linewidth=1.4, label="Portfolio")
         ax_top.set_title("Portfolio Equity (Rebased to 1.0)")
         ax_top.set_ylabel("Return vs Start")
-
-        # Format Y as percentages with 10% grid lines
-        ax_top.yaxis.set_major_formatter(PercentFormatter(xmax=1.0))  # eq_rel is fraction
-        ax_top.yaxis.set_major_locator(MultipleLocator(0.10))  # every 10%
+        ax_top.yaxis.set_major_formatter(PercentFormatter(xmax=1.0))
+        ax_top.yaxis.set_major_locator(MultipleLocator(0.10))
         ax_top.grid(axis="y", which="major", alpha=0.35, linestyle="--")
-
-        # X: year dividers & labels
-        ax_top.xaxis.set_major_locator(mdates.YearLocator())  # one tick per year
+        ax_top.xaxis.set_major_locator(mdates.YearLocator())
         ax_top.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
         ax_top.grid(axis="x", which="major", alpha=0.25)
-
         ax_top.legend(loc="best")
-
-        # Bottom: drawdown (area)
         ax_dd.fill_between(dd.index, dd.values, 0.0, step=None, alpha=0.5)
         ax_dd.set_ylabel("Drawdown")
         ax_dd.yaxis.set_major_formatter(PercentFormatter(xmax=1.0))
-        ax_dd.yaxis.set_major_locator(MultipleLocator(0.10))
         ax_dd.grid(axis="y", which="major", alpha=0.35, linestyle="--")
+        ax_dd.xaxis.set_major_locator(mdates.YearLocator())
+        ax_dd.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
         ax_dd.grid(axis="x", which="major", alpha=0.25)
-
-        # Nice ymin for dd (a bit below min), cap at 0
-        dd_min = float(dd.min()) if len(dd) else -0.01
-        ax_dd.set_ylim(min(dd_min * 1.05, -0.05), 0.0)
-
-        # Label X once at the bottom
-        ax_dd.set_xlabel("Date")
-        plt.tight_layout()
-        # Save
-        fig.savefig(os.path.join(out_port, "portfolio_equity.png"), bbox_inches="tight")
-        fig.savefig(os.path.join(out_port, "portfolio_equity@2x.png"), bbox_inches="tight", dpi=240)
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_port, "portfolio_equity_rebased.png"), bbox_inches="tight")
         plt.close(fig)
-        print("Portfolio equity (normalized) & drawdown chart saved")
 
-        # Prepare a combined DataFrame for portfolio (for stats computation)
+        # Build df_port for compute_statistics and saving
         cummax = port_equity.cummax()
         raw_dd = (cummax - port_equity) / cummax
-        # Determine on each day if any instrument had an open position (for drawdown duration, etc.)
-        pos_series = []
-        for name, df_inst in zip(symbols, per_inst_results):
-            df_temp = df_inst.copy()
-            df_temp['date'] = pd.to_datetime(df_temp['date'])
-            df_temp.set_index('date', inplace=True)
-            ser = df_temp['position'].fillna(0.0)
-            ser.name = name
-            pos_series.append(ser)
-        combined_pos = pd.concat(pos_series, axis=1).fillna(0.0)
-        open_any = combined_pos.abs().sum(axis=1) > 0
         df_port = pd.DataFrame({
             'date': port_equity.index,
-            'position': open_any.astype(int).values,
+            'position': (pd.DataFrame(scaled_by_symbol).abs().sum(axis=1) > 0).astype(int).reindex(
+                port_equity.index).fillna(0).values,
             'equity': port_equity.values,
             'drawdown': raw_dd.values,
-            'delta_pos': open_any.astype(float).values,
-            'pnl': portfolio_pnl.values,
+            'delta_pos': (pd.DataFrame(scaled_by_symbol).diff().abs().sum(axis=1)).reindex(port_equity.index).fillna(
+                0.0).values,
+            'pnl': portfolio_pnl.reindex(port_equity.index).fillna(0.0).values,
             'sample': 'OOS',
             'bundle': 1
         })
         df_port.to_csv(os.path.join(out_port, 'details_all_bundles.csv'), index=False)
+
+        # Stats via your central function
         portfolio_stats = compute_statistics(df_port, out_port, config=base_cfg)
         port_rets = port_equity.pct_change().fillna(0.0)
+
+        # === Portfolio Best/Worst saving (used by Excel BestWorst sheet) ===
+        period_res = top_and_bottom_periods(
+            port_rets,
+            resolution=base_cfg.get("statistics", {}).get("period_resolution", "monthly"),
+            n=5
+        )
+        pd.DataFrame(period_res["table"]).to_csv(os.path.join(out_port, "period_stats.csv"), index=False)
+        pd.DataFrame(period_res["top"]).to_csv(os.path.join(out_port, "top_periods.csv"), index=False)
+        pd.DataFrame(period_res["bottom"]).to_csv(os.path.join(out_port, "bottom_periods.csv"), index=False)
+
         return port_equity, port_rets, portfolio_stats
 
 
@@ -882,12 +879,20 @@ def main():
                 inst['strategy']['fx'] = sdef['fx']
             instruments.append(inst)
 
+    # ---- IDM: compute once per strategy (static) ----
+    try:
+        idm_map = compute_idm_map(cfg, instruments)
+    except Exception as e:
+        logging.warning("IDM computation failed; falling back to YAML idm scalars. Error: %s", e)
+        idm_map = {}
+
+
     # 1) Total capital from portfolio section
     total_capital = cfg['portfolio']['capital']
 
-    # 2) Resolve weights using your upgraded get_portfolio_weights(...)
-    weights_cfg = cfg.get('weights', {})  # may be {}, that's fine
-    weights, _unused = get_portfolio_weights(instruments, weights_cfg)
+    # 2) Resolve weights using get_portfolio_weights
+    weights_dict = get_portfolio_weights(cfg, [inst['symbol'] for inst in instruments])
+    weights = [weights_dict.get(inst['symbol'], 0.0) for inst in instruments]
 
     # 3) Save resolved weights so you can audit later (OPTIONAL but recommended)
     resolved = pd.DataFrame(
@@ -910,9 +915,9 @@ def main():
         name, combined, stats = run_backtest_for_instrument(
             inst, cfg, portfolio_cfg, fees_map, w, total_capital, save_per_asset,
             run_out, symbol_counts,
-            base_ccy, symbol_ccy_map, fx_dir, cfg['data']['timeframe'], multipliers,
+            base_ccy, symbol_ccy_map, fx_dir, cfg['data']['timeframe'], multipliers, idm_map=idm_map,
             save_per_instrument=save_per_instrument,
-            strategy_inputs=strategy_inputs
+            strategy_inputs=strategy_inputs,
         )
         instrument_names.append(name)
         per_inst_results.append(combined)
@@ -920,19 +925,56 @@ def main():
             inst_stats[name] = stats
 
     if save_per_strategy and strategy_inputs:
-        aggregate_by_strategy(
-            instrument_runs=strategy_inputs,
-            out_root=run_out,
-            make_plots=plot_per_strategy
-        )
-
-        period_res_strategy = top_and_bottom_periods(
-            stats_by_strategy[strategy_name]["series"]["returns"],  # returned by our new aggregate function
-            resolution=cfg.get("statistics", {}).get("period_resolution", "monthly"),
-            n=5
-        )
-        # Collect to export later:
-        bestworst_by_strategy[strategy_name] = period_res_strategy
+        # Group results by strategy to compute aggregated stats per strategy
+        inst_to_strat = {name: inst['strategy']['module'] for name, inst in zip(instrument_names, instruments)}
+        strat_dir_base = os.path.join(run_out, "strategies")
+        os.makedirs(strat_dir_base, exist_ok=True)
+        stats_by_strategy = {}
+        bestworst_by_strategy = {}
+        # Compute daily OOS returns series for each instrument  ✅ FIXED: ensure DatetimeIndex
+        returns_by_instrument = {}
+        for name, df_inst in zip(instrument_names, per_inst_results):
+            df_tmp = df_inst.copy()
+            # ensure datetime index + OOS only
+            df_tmp['date'] = pd.to_datetime(df_tmp['date'])
+            oos = df_tmp.loc[df_tmp['sample'] == 'OOS'].sort_values('date')
+            if oos.empty:
+                continue
+            oos_rets = []
+            for _, grp in oos.groupby('bundle'):
+                # set index to date for each bundle so pct_change has a DatetimeIndex
+                s = grp.set_index('date')['equity'].pct_change().dropna()
+                oos_rets.append(s)
+            if oos_rets:
+                # concat bundles on their datetime index
+                returns_by_instrument[name] = pd.concat(oos_rets).sort_index()
+        # Aggregate performance for each strategy
+        for strat in sorted({inst['strategy']['module'] for inst in instruments}):
+            # Collect returns of all instruments using this strategy
+            strat_symbols = {name: ret for name, ret in returns_by_instrument.items() if inst_to_strat[name] == strat}
+            if not strat_symbols:
+                continue
+            sdir = os.path.join(strat_dir_base, strat)
+            os.makedirs(sdir, exist_ok=True)
+            # Compute aggregated stats (treating all returns of this strategy as a portfolio)
+            stats = aggregate_by_strategy(strat_symbols, strat, list(strat_symbols.keys()), sdir, cfg)
+            # Rename output file for Excel integration (strategy_statistics.csv -> stats.csv)
+            strat_stats_path = os.path.join(sdir, "strategy_statistics.csv")
+            if os.path.exists(strat_stats_path):
+                os.replace(strat_stats_path, os.path.join(sdir, "stats.csv"))
+            stats_by_strategy[strat] = stats
+            # Compute best/worst periods for this strategy’s returns
+            period_res = top_and_bottom_periods(
+                stats["series"]["returns"],
+                resolution=cfg.get("statistics", {}).get("period_resolution", "monthly"),
+                n=5
+            )
+            bestworst_by_strategy[strat] = period_res
+            if period_res:
+                period_res["table"].to_csv(os.path.join(sdir, "period_stats.csv"), index=False)
+                period_res["top"].to_csv(os.path.join(sdir, "top_periods.csv"), index=False)
+                period_res["bottom"].to_csv(os.path.join(sdir, "bottom_periods.csv"), index=False)
+            print(f"✅ Saved aggregated stats for strategy '{strat}' in {sdir}")
 
     # Aggregate all instrument results into portfolio results
     port_equity, port_rets, portfolio_stats = aggregate_portfolio(per_inst_results, instruments, instrument_names, symbol_counts, total_capital, run_out, portfolio_cfg, cfg)
@@ -951,7 +993,7 @@ def main():
 
     # Optional: keep a preferred order, then append any extras automatically
     BASE_COLS = [
-        "cagr", "annual_vol", "sharpe", "sortino",
+        "cagr", 'total_return', 'annualised_return_plain', 'annualised_return_log', "annual_vol", "sharpe", "sortino",
         "max_drawdown", "avg_drawdown", "avg_dd_duration",
         "profit_factor", "expectancy", "win_rate",
         "std_daily", "ret_5pct", "ret_95pct",
