@@ -1,7 +1,8 @@
-import os
-from collections import defaultdict
+from __future__ import annotations
 import pandas as pd
-import matplotlib.pyplot as plt
+from typing import Dict, Sequence
+from strategies.A_weights import get_portfolio_weights
+from backtester.utils import compute_statistics
 
 
 def _safe_stats(pnl: pd.Series, equity: pd.Series) -> pd.DataFrame:
@@ -17,62 +18,52 @@ def _safe_stats(pnl: pd.Series, equity: pd.Series) -> pd.DataFrame:
     return pd.DataFrame([{"cagr": ann, "ann_vol": vol, "sharpe": sharpe, "max_dd": max_dd}])
 
 
-def aggregate_by_strategy(instrument_runs, out_root: str, make_plots: bool = True):
+def aggregate_by_strategy(
+    oos_returns_by_symbol: Dict[str, pd.Series],
+    strategy_name: str,
+    instruments: Sequence[str],
+    run_out: str,
+    config: dict,
+    initial_capital: float = 1_000_000.0,
+) -> dict:
     """
-    instrument_runs: list of dicts with:
-      {
-        'symbol': str,
-        'strategy': str,          # e.g., 'ewmac'
-        'alloc_capital': float,   # allocation used for this instrument
-        'df': DataFrame           # must include 'date','pnl' and (optionally) 'sample'
-      }
+    Build a synthetic portfolio from all instruments using `strategy_name`
+    and compute stats via the central compute_statistics(...).
+    Returns stats dict and attaches 'series' with 'returns' and 'equity'.
     """
-    groups = defaultdict(list)
-    for r in instrument_runs:
-        df = r["df"].copy()
-        if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"])
-            df = df.set_index("date").sort_index()
-        if "sample" in df.columns:
-            df = df[df["sample"] == "OOS"]
-        if "pnl" not in df.columns:
-            continue
-        pnl = df["pnl"].fillna(0.0).rename(r["symbol"])
-        groups[r["strategy"]].append({"pnl": pnl, "alloc_capital": float(r["alloc_capital"])})
+    if not instruments:
+        return {}
 
-    results = {}
-    base_dir = os.path.join(out_root, "strategies")
-    os.makedirs(base_dir, exist_ok=True)
+    # 1) Align OOS returns for the instruments in this strategy
+    df = pd.DataFrame({sym: oos_returns_by_symbol[sym] for sym in instruments}).sort_index()
+    df = df.dropna(how="all")
+    if df.empty:
+        return {}
 
-    for strat_key, items in groups.items():
-        if not items:
-            continue
-        combined = pd.concat([it["pnl"] for it in items], axis=1).fillna(0.0)
-        strat_pnl = combined.sum(axis=1)
-        init_cap = sum(it["alloc_capital"] for it in items)
-        strat_equity = strat_pnl.cumsum() + init_cap
+    # 2) Weights
+    w = pd.Series(get_portfolio_weights(config, instruments))
+    if w.sum() == 0:
+        w[:] = 1.0 / len(w)
+    else:
+        w = w / w.sum()
 
-        strat_dir = os.path.join(base_dir, strat_key)
-        os.makedirs(strat_dir, exist_ok=True)
+    # 3) Synthetic portfolio returns & equity
+    port_ret = (df.mul(w, axis=1)).sum(axis=1).dropna()
+    equity = (1.0 + port_ret).cumprod() * float(initial_capital)
 
-        out = pd.DataFrame({
-            "date": strat_equity.index,
-            "pnl": strat_pnl.values,
-            "equity": strat_equity.values
-        })
-        out.to_csv(os.path.join(strat_dir, "details_all_bundles.csv"), index=False)
+    # 4) Build the 'combined' DataFrame for compute_statistics
+    combined = pd.DataFrame({
+        "date": port_ret.index,
+        "returns": port_ret.values,
+        "equity": equity.values,
+        "sample": "OOS",         # mark these rows as OOS
+        "strategy": strategy_name,
+    })
 
-        _safe_stats(strat_pnl, strat_equity).to_csv(os.path.join(strat_dir, "stats.csv"), index=False)
+    # 5) Call your central stats function
+    stats = compute_statistics(combined=combined, run_out=run_out, config=config)
 
-        if make_plots:
-            plt.figure(figsize=(7,4))
-            plt.plot(strat_equity.index, strat_equity.values, label=strat_key)
-            plt.title(f"{strat_key} Equity")
-            plt.xlabel("Date"); plt.ylabel("Equity"); plt.legend()
-            plt.tight_layout()
-            plt.savefig(os.path.join(strat_dir, "equity.png"))
-            plt.close()
-
-        results[strat_key] = {"pnl": strat_pnl, "equity": strat_equity, "init_capital": init_cap}
-
-    return results
+    # 6) Attach the series for other consumers (best/worst; plots)
+    stats["series"] = {"returns": port_ret, "equity": equity}
+    stats["combined"] = combined
+    return stats

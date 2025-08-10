@@ -94,6 +94,25 @@ def get_periods_per_year(tf: str) -> float:
     return 252  # default fallback
 
 
+def hac_se_for_mean(x: pd.Series, L: int) -> float:
+    """
+    Newey-West (HAC) standard error of the mean using Bartlett kernel.
+    L is the max lag; for a window of W bars use L = W-1 (e.g., 29 for 30-bar).
+    """
+    x = pd.to_numeric(x, errors="coerce").dropna()
+    n = x.size
+    if n == 0:
+        return np.nan
+    xc = x - x.mean()
+    gamma0 = (xc * xc).mean()
+    var_hat = gamma0
+    for k in range(1, min(L, n - 1) + 1):
+        gk = (xc.iloc[:-k] * xc.iloc[k:]).mean()
+        w = 1.0 - k / (L + 1.0)
+        var_hat += 2.0 * w * gk
+    return np.sqrt(var_hat / n)
+
+
 def thirty_day_stats_from_returns(oos_full: pd.DataFrame, lookback: int = 30):
     """
     Compute overlapping 30-bar compounded returns from *daily returns* derived from equity.
@@ -172,16 +191,22 @@ def thirty_day_stats_from_returns(oos_full: pd.DataFrame, lookback: int = 30):
 
     mean_pm = float(r30.mean())
     std_pm  = float(r30.std(ddof=1))
-    ci_half = 1.96 * std_pm / np.sqrt(n)
+    # ci_half = 1.96 * std_pm / np.sqrt(n)
+
+    window = 30
+    se = hac_se_for_mean(r30, L=window - 1)
+    mean_ = r30.mean()
+    z = 1.96
+    ci_low = mean_ - z * se
+    ci_high = mean_ + z * se
 
     return {
         "avg_30d_ret": mean_pm,
         "avg_30d_ret_plus_2std":  mean_pm + 2.0 * std_pm,
         "avg_30d_ret_minus_2std": mean_pm - 2.0 * std_pm,
-        "avg_30d_ret_ci_low":     mean_pm - ci_half,
-        "avg_30d_ret_ci_high":    mean_pm + ci_half,
+        "avg_30d_ret_ci_low":     ci_low,
+        "avg_30d_ret_ci_high":    ci_high,
     }
-
 
 
 def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None) -> dict:

@@ -32,6 +32,24 @@ output:
   save_per_strategy: true
   plots.per_strategy: true
 
+statistics:
+  period_resolution: monthly   # monthly | quarterly
+
+idm:
+  enabled: true                # false -> use the scalar already in yaml
+  mode: static                 # static | rolling
+  floor_negatives: true        # ρ_ij <- max(ρ_ij, 0)
+  min_overlap: 60              # minimum overlapping bars to compute ρ
+  window: 250                  # for rolling IDM (e.g., ~1Y daily)
+  returns_freq: daily          # daily | weekly
+  fallback: 1.0                # used when not enough overlap
+
+capital_policy:
+  mode: none                   # none | reinvesting | periodic_rebalance
+  reinvesting_frequency: monthly   # weekly | monthly | quarterly (3M)
+  rebalance_frequency: quarterly   # monthly | quarterly
+
+
 # fee schedule
 fees:
   mapping: './config/fees.json'

@@ -58,7 +58,7 @@ def test1_permutation_oos(inst_cfg: dict, inst_folder: str, w, B: int = 1000) ->
             else:
                 raise KeyError("No PnL or Equity data to compute original PnL for Test 1.")
     # 4) Permutation trials
-    strat_mod = import_module(f"backtester.strategies.{inst_cfg['strategy']['module']}")
+    strat_mod = import_module(f"strategies.{inst_cfg['strategy']['module']}")
     strat_fn = getattr(strat_mod, inst_cfg['strategy']['function'])
     count_ge = 0
     for _ in range(B):

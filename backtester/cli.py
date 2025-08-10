@@ -25,41 +25,8 @@ from backtester.stat_tests import (
 from backtester.fx import load_symbol_currency_map, get_fx_series
 from backtester.reporting_excel import export_summary_xlsx
 from backtester.strategy_aggregate import aggregate_by_strategy
-
-
-def get_portfolio_weights(instruments, weights_cfg):
-    """
-    Resolve weights with precedence: pairs > strategy > asset > equal.
-    Normalize to sum 1.0. Return (weights_list, total_capital).
-    """
-    total_capital = weights_cfg.get('capital') if isinstance(weights_cfg, dict) else None
-    # Fallback to portfolio.capital if not provided here (main will pass it anyway)
-    if total_capital is None:
-        total_capital = 0  # will be set by caller
-
-    w_asset = (weights_cfg or {}).get('asset', {}) if isinstance(weights_cfg, dict) else {}
-    w_strategy = (weights_cfg or {}).get('strategy', {}) if isinstance(weights_cfg, dict) else {}
-    w_pairs = (weights_cfg or {}).get('pairs', {}) if isinstance(weights_cfg, dict) else {}
-
-    raw = []
-    for inst in instruments:
-        sym = inst['symbol']
-        strat_key = inst.get('strategy_key') or inst['strategy']['module']
-        pair_override = (w_pairs.get(sym, {}) or {}).get(strat_key)
-        if pair_override is not None:
-            raw.append(float(pair_override))
-            continue
-        if strat_key in w_strategy:
-            raw.append(float(w_strategy[strat_key]))
-            continue
-        if sym in w_asset:
-            raw.append(float(w_asset[sym]))
-            continue
-        raw.append(1.0)  # equal if nothing provided
-
-    s = sum(raw) or 1.0
-    weights = [x / s for x in raw]
-    return weights, total_capital
+from backtester.stats.periods import top_and_bottom_periods
+from strategies.A_weights import get_portfolio_weights
 
 
 def parse_args():
@@ -118,7 +85,7 @@ def run_backtest_for_instrument(inst, base_cfg, portfolio_cfg, fees_map, weight,
     # 2) Re-run strategy on each OOS segment with best params to collect detailed diagnostics
     splits = list(generate_splits(df, inst_cfg['optimization']['bundles']))
     all_diags = []
-    strat_module = import_module(f"backtester.strategies.{inst_cfg['strategy']['module']}")
+    strat_module = import_module(f"strategies.{inst_cfg['strategy']['module']}")
     strat_fn = getattr(strat_module, inst_cfg['strategy']['function'])
     find_signal_mode = bool(portfolio_cfg.get('max_open_trades'))  # True if in "find signal" mode
     for (_, row), (_, oos_df) in zip(results.iterrows(), splits):
@@ -355,6 +322,16 @@ def aggregate_portfolio(per_inst_results: list, instruments: list, instrument_na
         })
         portfolio_stats = compute_statistics(df_port, out_port, config=base_cfg)
         port_rets = port_equity.pct_change().fillna(0.0)
+
+        period_res = top_and_bottom_periods(
+            port_rets,
+            resolution=base_cfg.get("statistics", {}).get("period_resolution", "monthly"),
+            n=5
+        )
+
+        # Keep this somewhere to export later (step 7):
+        bestworst_portfolio = period_res
+
         return port_equity, port_rets, portfolio_stats
     else:
         # --- Standard Mode: aggregate P&L of all instruments (weighted by capital) ---
@@ -661,7 +638,7 @@ def run_statistical_tests(instruments: list, weights: list, symbol_counts: Count
             if 'vol_window' in best_params:
                 best_params['vol_window'] = int(best_params['vol_window'])
             # 6c. Generate positions on full data using best params
-            strat_mod = import_module(f"backtester.strategies.{inst['strategy']['module']}")
+            strat_mod = import_module(f"strategies.{inst['strategy']['module']}")
             strat_fn = getattr(strat_mod, inst['strategy']['function'])
             best_params['capital'] = total_capital * w  # allocate capital fraction to this instrument
 
@@ -948,6 +925,14 @@ def main():
             out_root=run_out,
             make_plots=plot_per_strategy
         )
+
+        period_res_strategy = top_and_bottom_periods(
+            stats_by_strategy[strategy_name]["series"]["returns"],  # returned by our new aggregate function
+            resolution=cfg.get("statistics", {}).get("period_resolution", "monthly"),
+            n=5
+        )
+        # Collect to export later:
+        bestworst_by_strategy[strategy_name] = period_res_strategy
 
     # Aggregate all instrument results into portfolio results
     port_equity, port_rets, portfolio_stats = aggregate_portfolio(per_inst_results, instruments, instrument_names, symbol_counts, total_capital, run_out, portfolio_cfg, cfg)
