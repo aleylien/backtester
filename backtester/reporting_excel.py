@@ -363,7 +363,7 @@ def export_summary_xlsx(run_out: str) -> str:
 
             start_row += len(df_strat) + 2
 
-        # ---------- Sheet 2: Charts ----------
+        # ---------- Sheet: Charts ----------
         ws_charts = workbook.add_worksheet("Charts")
         writer.sheets["Charts"] = ws_charts
 
@@ -410,7 +410,7 @@ def export_summary_xlsx(run_out: str) -> str:
                     ws_charts.insert_image(row + 1, 0, img, {"x_scale": X_SCALE, "y_scale": Y_SCALE})
                     row += _rows_needed_for_image(img, Y_SCALE)
 
-        # ---------- Sheet 3: Correlations ----------
+        # ---------- Sheet: Correlations ----------
         ws_corr = workbook.add_worksheet("Correlations")
         writer.sheets["Correlations"] = ws_corr
         start = 0
@@ -429,14 +429,76 @@ def export_summary_xlsx(run_out: str) -> str:
             s_corr.to_excel(writer, sheet_name="Correlations", startrow=start, index=False)
             start += len(s_corr) + 2
 
-        # ---------- Sheet 4: Best/Worst ----------
+        # ---------- Sheet: Weights ----------
+        ws_wgt = workbook.add_worksheet("Weights")
+        writer.sheets["Weights"] = ws_wgt
+
+        start = 0
+        w_path = os.path.join(run_out, "weights_resolved.csv")
+        w_res = _safe_read_csv(w_path)
+
+        if w_res is None or w_res.empty:
+            ws_wgt.write(start, 0, "Resolved Weights", fmt_title)
+            start += 1
+            ws_wgt.write(start, 0, "weights_resolved.csv not found or empty")
+            start += 2
+        else:
+            # 1) Drop 'instrument' (if present), rename cols, ensure numeric Weight
+            w_res = w_res.drop(columns=["instrument"], errors="ignore")
+            w_res = w_res.rename(columns={"symbol": "Asset", "strategy": "Strategy", "weight": "Weight"})
+            if "Weight" in w_res.columns:
+                w_res["Weight"] = pd.to_numeric(w_res["Weight"], errors="coerce").fillna(0.0)
+
+            # --- Per-asset table ---
+            w_res_disp = _round_numeric(w_res.copy(), 6)
+
+            ws_wgt.write(start, 0, "Resolved Weights (per asset)", fmt_title)
+            start += 1
+            w_res_disp.to_excel(writer, sheet_name="Weights", startrow=start, startcol=0, index=False)
+
+            # Column formats (safe here because this is a dedicated sheet)
+            headers = list(w_res_disp.columns)
+            cidx = {h: i for i, h in enumerate(headers)}
+            if "Asset" in cidx:
+                ws_wgt.set_column(cidx["Asset"], cidx["Asset"], 18)
+            if "Strategy" in cidx:
+                ws_wgt.set_column(cidx["Strategy"], cidx["Strategy"], 22)
+            if "Weight" in cidx:
+                ws_wgt.set_column(cidx["Weight"], cidx["Weight"], 12, fmt_pct2)
+
+            start += len(w_res_disp) + 2
+
+            # --- Sum of weights by Strategy (pivot-like) ---
+            if {"Strategy", "Weight"}.issubset(set(w_res.columns)):
+                w_by_strat = (
+                    w_res.groupby("Strategy", as_index=False)["Weight"]
+                         .sum()
+                         .sort_values("Weight", ascending=False)
+                         .reset_index(drop=True)
+                )
+                w_by_strat_disp = _round_numeric(w_by_strat, 6)
+
+                ws_wgt.write(start, 0, "Resolved Weights (sum by Strategy)", fmt_title)
+                start += 1
+                w_by_strat_disp.to_excel(writer, sheet_name="Weights", startrow=start, startcol=0, index=False)
+
+                headers2 = list(w_by_strat_disp.columns)
+                cidx2 = {h: i for i, h in enumerate(headers2)}
+                if "Strategy" in cidx2:
+                    ws_wgt.set_column(cidx2["Strategy"], cidx2["Strategy"], 22)
+                if "Weight" in cidx2:
+                    ws_wgt.set_column(cidx2["Weight"], cidx2["Weight"], 12, fmt_pct2)
+
+                start += len(w_by_strat_disp) + 2
+
+        # ---------- Sheet: Best/Worst ----------
         try:
             _write_bestworst_sheet(writer)
         except Exception as e:
             # Don't fail the whole export if Best/Worst reading had an issue
             pass
 
-        # ---------- Sheet 5: Run Info ----------
+        # ---------- Sheet: Run Info ----------
         ws_info = workbook.add_worksheet("Run Info")
         writer.sheets["Run Info"] = ws_info
         info = []
@@ -466,6 +528,42 @@ def export_summary_xlsx(run_out: str) -> str:
         for r, (k, v) in enumerate(info):
             ws_info.write(r, 0, k, fmt_bold)
             ws_info.write(r, 1, v)
+
+        # ---------- Sheet: Config (YAML) ----------
+        ws_cfg = workbook.add_worksheet("Config (YAML)")
+        writer.sheets["Config (YAML)"] = ws_cfg
+
+        # Try common locations; prefer a copy saved alongside the run
+        cfg_candidates = [
+            os.path.join(run_out, "strategy_config.yaml"),
+            os.path.join(run_out, "used_strategy_config.yaml"),
+            os.path.join(run_out, "config.yaml"),
+            os.path.join(os.getcwd(), "strategy_config.yaml"),
+        ]
+        cfg_path = next((p for p in cfg_candidates if os.path.exists(p)), None)
+
+        # Formats
+        fmt_hdr = fmt_title  # you already have this
+        fmt_mono = workbook.add_format({"font_name": "Courier New", "font_size": 9, "text_wrap": True})
+        ws_cfg.set_column(0, 0, 100, fmt_mono)  # wide, wrapped single column
+
+        row = 0
+        ws_cfg.write(row, 0, "strategy_config.yaml", fmt_hdr)
+        row += 2
+
+        if cfg_path is None:
+            ws_cfg.write(row, 0, "Could not find strategy_config.yaml in run_out or CWD.")
+            row += 1
+        else:
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as fh:
+                    for line in fh.read().splitlines():
+                        ws_cfg.write_string(row, 0, line, fmt_mono)
+                        row += 1
+            except Exception as e:
+                ws_cfg.write(row, 0, f"Error reading YAML: {e}")
+                row += 1
+
 
     return xlsx_path
 
