@@ -29,7 +29,7 @@ from backtester.stats.periods import top_and_bottom_periods
 from backtester.idm import compute_idm_map
 from backtester.compounding import scale_pnl_with_policy
 from strategies.A_weights import get_portfolio_weights
-
+from backtester.normalised_price import compute_normalised_price
 
 
 def parse_args():
@@ -164,6 +164,34 @@ def run_backtest_for_instrument(inst, base_cfg, portfolio_cfg, fees_map, weight,
 
         # Optional: an initial position for buffering to start from (default 0 contracts)
         params.setdefault("initial_pos", 0)
+
+        # ---- Choose which price the strategy should see: RAW vs NORMALISED ----
+        # start from 'close' and always ensure a 'price' column exists
+        oos_df = oos_df.copy()
+        if "price" not in oos_df.columns:
+            oos_df["price"] = oos_df["close"]
+
+        price_cfg = (base_cfg.get("data") or {})
+        price_type = (price_cfg.get("price_type", "raw") or "raw").lower()
+        if price_type in {"normalised", "normalized", "norm"}:
+            norm_cfg = (price_cfg.get("normalized_price") or price_cfg.get("normalised_price") or {})
+            method = (norm_cfg.get("method", "rolling") or "rolling").lower()
+            window = int(norm_cfg.get("window", 25))
+            span = norm_cfg.get("span", None)
+            minp = norm_cfg.get("min_periods", None)
+            scale = float(norm_cfg.get("scale", 100.0))
+            start_value = float(norm_cfg.get("start_value", 0.0))
+
+            oos_df["price"] = compute_normalised_price(
+                oos_df["close"],
+                method=method,
+                window=window,
+                span=span,
+                min_periods=minp,
+                scale=scale,
+                start_value=start_value,
+            )
+        # (PnL still uses oos_df['close'] later — do NOT change that.)
 
         safe_params = filter_params_for_callable(strat_fn, params)
         res = strat_fn(oos_df, **safe_params)
