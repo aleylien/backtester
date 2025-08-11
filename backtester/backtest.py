@@ -1,7 +1,9 @@
 import pandas as pd
 from numpy import inf
 from itertools import product
+import numpy as np
 from backtester.utils import run_strategy
+import logging
 
 
 def generate_splits(df: pd.DataFrame, n_splits: int):
@@ -33,18 +35,9 @@ def generate_splits(df: pd.DataFrame, n_splits: int):
         yield is_df, oos_df
 
 
-def optimize_strategy(
-    df: pd.DataFrame,
-    param_grid: dict,
-    target: str,
-    config: dict
-) -> dict:
-    """
-    Brute‐force search over param_grid.  For each params dict:
-      metrics = run_strategy(df, config, **params)
-    then picks the params that maximize/minimize the chosen target.
-    """
-    best_score  = -inf
+def optimize_strategy(df, param_grid, target, config):
+
+    best_score = -np.inf
     best_params = None
 
     # Cartesian product of all grid values
@@ -52,22 +45,55 @@ def optimize_strategy(
         params = dict(zip(param_grid.keys(), vals))
         metrics = run_strategy(df, config, **params)
 
-        if target == 'sharpe':
-            score = metrics['sharpe']
-        elif target == 'pnl':
-            score = metrics.get('pnl',
-                       metrics['equity'][-1] - metrics['equity'][0])
-        elif target == 'profit_factor':
-            score = metrics['profit_factor']
-        elif target == 'max_drawdown':
-            # minimize drawdown ⇒ maximize negative
-            score = -metrics['max_drawdown']
-        else:
-            raise ValueError(f"Unknown optimization target: {target!r}")
+        # ---- Robust scoring ---------------------------------------------------
+        score = None
+        try:
+            if target == "sharpe":
+                score = float(metrics.get("sharpe", -np.inf))
+
+            elif target == "pnl":
+                # 1) scalar pnl
+                if "pnl" in metrics and metrics["pnl"] is not None:
+                    score = float(metrics["pnl"])
+                # 2) equity delta
+                if score is None and "equity" in metrics:
+                    e = np.asarray(metrics["equity"], dtype=float)
+                    e = e[np.isfinite(e)]
+                    if e.size >= 2:
+                        score = float(e[-1] - e[0])
+                # 3) compounded return from returns
+                if score is None and "returns" in metrics:
+                    r = pd.to_numeric(pd.Series(metrics["returns"]), errors="coerce").dropna()
+                    if not r.empty:
+                        score = float((1.0 + r).prod() - 1.0)
+                # 4) sum of pnl_series
+                if score is None and "pnl_series" in metrics:
+                    p = pd.to_numeric(pd.Series(metrics["pnl_series"]), errors="coerce").dropna()
+                    if not p.empty:
+                        score = float(p.sum())
+                if score is None:
+                    logging.warning("Optimization: no pnl/equity/returns in metrics for params %s; skipping", params)
+                    continue
+
+            elif target == "profit_factor":
+                score = float(metrics.get("profit_factor", -np.inf))
+
+            elif target == "max_drawdown":
+                md = metrics.get("max_drawdown", None)
+                score = -float(md) if md is not None and np.isfinite(md) else -np.inf
+
+            else:
+                raise ValueError(f"Unknown optimization target: {target!r}")
+        except Exception as e:
+            logging.warning("Optimization scoring failed for params %s: %s", params, e)
+            continue
+        # ----------------------------------------------------------------------
 
         if score > best_score:
             best_score, best_params = score, params
 
+    if best_params is None:
+        raise RuntimeError("No valid parameter set found for target %r" % target)
     return best_params
 
 

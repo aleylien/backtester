@@ -1,0 +1,2 @@
+instrument,symbol,strategy,forecast_scale
+NG|ewmac,NG,ewmac,5.265633452830738

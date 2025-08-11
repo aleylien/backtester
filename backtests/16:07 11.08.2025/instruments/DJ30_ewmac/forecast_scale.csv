@@ -1,0 +1,2 @@
+instrument,symbol,strategy,forecast_scale
+DJ30|ewmac,DJ30,ewmac,3.863340131954001

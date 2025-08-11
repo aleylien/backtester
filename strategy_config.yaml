@@ -4,7 +4,7 @@ data:
   timeframe: '1d'
   start: '2000-01-01'
   end:   '2020-12-31'
-  price_type: normalised          # raw | normalized | normalised | norm
+  price_type: raw          # raw | normalized | normalised | norm
   normalized_price:
     method: ewm        # rolling | ewm
     window: 25             # for rolling
@@ -17,7 +17,7 @@ data:
 # global optimization defaults (can be overridden per-strategy below)
 optimization:
   bundles: 10
-  target:  profit_factor
+  target:  pnl  # sharpe, pnl, profit_factor, max_drawdown
   param_grid:
     _module:       ['ewmac']
     _function:     ['ewmac']
@@ -81,7 +81,7 @@ portfolio:
 
   assets:
     - SP500
-    - DAX
+    - NASDAQ
 
   strategies:
     ewmac:

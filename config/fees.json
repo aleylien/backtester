@@ -1,14 +1,35 @@
 {
   "SP500": {
-    "commission_usd": 1.0,
+    "commission_usd": 3.0,
     "commission_pct": 0.0,
     "slippage_pct": 0.0002
   },
     "DAX": {
-    "commission_usd": 1.0,
+    "commission_usd": 3.0,
     "commission_pct": 0.0,
     "slippage_pct": 0.0002
   },
+    "FTSE": {
+    "commission_usd": 3.0,
+    "commission_pct": 0.0,
+    "slippage_pct": 0.0002
+  },
+    "NASDAQ": {
+    "commission_usd": 3.0,
+    "commission_pct": 0.0,
+    "slippage_pct": 0.0002
+  },
+    "DJ30": {
+    "commission_usd": 3.0,
+    "commission_pct": 0.0,
+    "slippage_pct": 0.0002
+  },
+    "NG": {
+    "commission_usd": 3.0,
+    "commission_pct": 0.0,
+    "slippage_pct": 0.0002
+  },
+
   "EURUSD": {
     "commission_usd": 0.0,
     "commission_pct": 0.0,

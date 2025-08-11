@@ -1,0 +1,2 @@
+instrument,symbol,strategy,forecast_scale
+NASDAQ|trend_breakout,NASDAQ,trend_breakout,0.8838774541740265

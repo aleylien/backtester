@@ -1,0 +1,3 @@
+,trend_breakout,ewmac
+trend_breakout,1.0,0.8271
+ewmac,0.8271,1.0

@@ -1,4 +1,5 @@
 {
   "DAX": "EUR",
-  "SP500": "USD"
+  "SP500": "USD",
+  "FTSE": "GBP"
 }

@@ -7,6 +7,46 @@ import matplotlib.pyplot as plt
 from inspect import signature
 
 
+# === Robust returns cleaning & CAGR ===========================================
+
+def _clean_returns_series(rets: pd.Series) -> pd.Series:
+    """Make returns safe for log/exponent math."""
+    r = pd.to_numeric(rets, errors="coerce")
+    r = r.replace([np.inf, -np.inf], np.nan).dropna()
+    # values <= -1 make log1p invalid; drop or clip (drop is safer for stats)
+    r = r[r > -0.999999]
+    return r
+
+def _safe_cagr_from_returns(rets: pd.Series, ppy: int | None = None) -> float:
+    """
+    Time-based CAGR from a returns series.
+    - Cleans the series (NaN/inf, r<=-1)
+    - Uses elapsed years if we have a DatetimeIndex; otherwise PPY
+    """
+    r = _clean_returns_series(rets)
+    if r.empty:
+        return float("nan")
+
+    # years span
+    if isinstance(r.index, pd.DatetimeIndex):
+        years = (r.index[-1] - r.index[0]).days / 365.25
+        if years <= 0:
+            return float("nan")
+    else:
+        # fall back to PPY (estimate if not given)
+        if ppy is None:
+            try:
+                ppy = _estimate_ppy_from_index(pd.DatetimeIndex(r.index))
+            except Exception:
+                ppy = 252
+        years = max(1e-9, len(r) / float(ppy))
+
+    # log compounding (numerically stable)
+    log_ret = np.log1p(r.clip(lower=-0.999999))
+    ann_log = log_ret.sum() / years
+    return float(np.expm1(ann_log))
+
+
 def filter_params_for_callable(func, params: dict) -> dict:
     """Keep only kwargs the function can accept (unless it has **kwargs)."""
     try:
@@ -421,10 +461,10 @@ def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None
     print("\n=== Aggregate Performance ===")
     # Aggregate daily returns across all bundles (for aggregate Sharpe, Sortino, etc.)
     all_rets = pd.concat([g['equity'].pct_change().dropna() for _, g in oos_full.groupby('bundle')])
-    if len(all_rets) == 0 or (oos_full['equity'].iloc[-1] <= 0):
-        cagr_a = -1.0
-    else:
-        cagr_a = (all_rets.add(1).prod()) ** (periods / len(all_rets)) - 1
+
+    # Robust CAGR (replaces raw (1+r).prod() ** (...) − 1)
+    cagr_a = _safe_cagr_from_returns(all_rets)
+
     ann_vol_a = all_rets.std() * np.sqrt(periods) if all_rets.std() > 0 else np.nan
     sharpe_a = (all_rets.mean() / all_rets.std() * np.sqrt(periods)) if all_rets.std() > 0 else np.nan
     neg_a = all_rets[all_rets < 0]
@@ -446,7 +486,10 @@ def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None
         r = r.dropna()
 
     ppy = _estimate_ppy_from_index(r.index)  # ✅ auto-detects trading days & intraday bars
-    annualised_return_log = float(np.expm1(np.log1p(r).mean() * ppy))
+
+    r_safe = _clean_returns_series(all_rets)
+
+    annualised_return_log = float(np.expm1(np.log1p(r_safe).mean() * ppy))
 
     def _compute_oos_total_return(combined: pd.DataFrame) -> float:
         """

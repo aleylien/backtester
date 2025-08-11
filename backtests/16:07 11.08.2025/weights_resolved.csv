@@ -1,0 +1,13 @@
+instrument,symbol,strategy,weight
+SP500|ewmac,SP500,ewmac,0.08333333333333333
+SP500|trend_breakout,SP500,trend_breakout,0.08333333333333333
+DAX|ewmac,DAX,ewmac,0.08333333333333333
+DAX|trend_breakout,DAX,trend_breakout,0.08333333333333333
+FTSE|ewmac,FTSE,ewmac,0.08333333333333333
+FTSE|trend_breakout,FTSE,trend_breakout,0.08333333333333333
+NASDAQ|ewmac,NASDAQ,ewmac,0.08333333333333333
+NASDAQ|trend_breakout,NASDAQ,trend_breakout,0.08333333333333333
+DJ30|ewmac,DJ30,ewmac,0.08333333333333333
+DJ30|trend_breakout,DJ30,trend_breakout,0.08333333333333333
+NG|ewmac,NG,ewmac,0.08333333333333333
+NG|trend_breakout,NG,trend_breakout,0.08333333333333333

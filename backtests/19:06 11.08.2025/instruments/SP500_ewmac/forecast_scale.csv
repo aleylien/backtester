@@ -1,0 +1,2 @@
+instrument,symbol,strategy,forecast_scale
+SP500|ewmac,SP500,ewmac,3.327909283564681

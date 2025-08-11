@@ -1,0 +1,5 @@
+,SP500 (ewmac),SP500 (trend_breakout),NASDAQ (ewmac),NASDAQ (trend_breakout)
+SP500 (ewmac),1.0,0.7984,0.8579,0.7227
+SP500 (trend_breakout),0.7984,1.0,0.6918,0.8163
+NASDAQ (ewmac),0.8579,0.6918,1.0,0.8271
+NASDAQ (trend_breakout),0.7227,0.8163,0.8271,1.0

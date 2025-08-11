@@ -16,7 +16,7 @@ from backtester.config import load_config
 from backtester.data_loader import DataLoader
 from backtester.backtest import run_backtest, generate_splits
 from backtester.pnl_engine import simulate_pnl
-from backtester.utils import compute_statistics, filter_params_for_callable
+from backtester.utils import compute_statistics, filter_params_for_callable, _safe_cagr_from_returns, _clean_returns_series
 from backtester.stat_tests import (
     test1_permutation_oos,
     test2_permutation_training,
@@ -1209,7 +1209,9 @@ def main():
     if in_draw and current_dur > 0:
         durations.append(current_dur)
     rets = port_rets  # daily returns series
-    cagr = (1 + rets).prod() ** (252 / len(rets)) - 1 if len(rets) > 0 else 0.0
+
+    rets = _clean_returns_series(rets)
+    cagr = _safe_cagr_from_returns(rets)
     ann_vol = rets.std() * np.sqrt(252)
     sharpe = (rets.mean() / rets.std() * np.sqrt(252)) if rets.std() > 0 else np.nan
     sortino = (rets.mean() / rets[rets < 0].std() * np.sqrt(252)) if len(rets[rets < 0]) > 0 else np.nan
