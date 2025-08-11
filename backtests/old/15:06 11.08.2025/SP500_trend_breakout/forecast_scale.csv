@@ -1,0 +1,2 @@
+instrument,symbol,strategy,forecast_scale
+SP500|trend_breakout,SP500,trend_breakout,0.9185002104789887

@@ -82,7 +82,7 @@ def export_summary_xlsx(run_out: str) -> str:
         cidx = {h: i for i, h in enumerate(headers)}
         pct_cols = ["CAGR", "Ann.Vol", "Max DD", "Avg DD", "Win Rate",
                     "Avg 30d", "Avg 30d +2σ", "Avg 30d -2σ", "Avg 30d CI low", "Avg 30d CI high"
-                    , "Ann. Ret. Plain", "Ann. Ret. Log"]
+                    , "Ann. Ret. Log", "Mean Ann. Ret."]
         for h in pct_cols:
             if h in cidx:
                 ws.set_column(cidx[h], cidx[h], 12, fmt_pct2)
@@ -98,11 +98,12 @@ def export_summary_xlsx(run_out: str) -> str:
         "name": "Name",
         "cagr": "CAGR",
         'total_return': "ROE",
-        'annualised_return_plain': "Ann. Ret. Plain",
+        "mean_annual_return": "Mean Ann. Ret.",
         'annualised_return_log': "Ann. Ret. Log",
         "annual_vol": "Ann.Vol",
         "sharpe": "Sharpe",
         "sortino": "Sortino",
+        "skew": "Skew",
         "max_drawdown": "Max DD",
         "avg_drawdown": "Avg DD",
         "avg_dd_duration": "Avg DD Dur",
@@ -128,7 +129,8 @@ def export_summary_xlsx(run_out: str) -> str:
     pct_cols_overview = [
         "CAGR", "Ann.Vol", "Max DD", "Avg DD", "5% Tail", "95% Tail",
         "Avg Win", "Avg Loss", "Max Loss (Bar)", "Avg 30d", "Avg 30d +2σ",
-        "Avg 30d -2σ", "Avg 30d CI low", "Avg 30d CI high", "Avg Cost", "Ann. Ret. Plain", "Ann. Ret. Log", "ROE"
+        "Avg 30d -2σ", "Avg 30d CI low", "Avg 30d CI high", "Avg Cost", "Ann. Ret. Log", "ROE",
+        "Mean Ann. Ret.",
         # NOTE: Sharpe is unitless → not formatted as %
     ]
 
@@ -137,11 +139,12 @@ def export_summary_xlsx(run_out: str) -> str:
     strat_label_map = {
         "cagr": "CAGR",
         'total_return': "ROE",
-        'annualised_return_plain': "Ann. Ret. Plain",
+        "mean_annual_return": "Mean Ann. Ret.",
         'annualised_return_log': "Ann. Ret. Log",
         "annual_vol": "Ann.Vol",
         "sharpe": "Sharpe",
         "sortino": "Sortino",
+        "skew": "Skew",
         "max_drawdown": "Max DD",
         "avg_drawdown": "Avg DD",
         "avg_dd_duration": "Avg DD Dur",
@@ -173,6 +176,7 @@ def export_summary_xlsx(run_out: str) -> str:
         fmt_num4   = workbook.add_format({"num_format": "0.0000"})
         fmt_bold   = workbook.add_format({"bold": True})
         fmt_port   = workbook.add_format({"bold": True, "bg_color": "#FFF2CC"})
+        fmt_num2   = workbook.add_format({"num_format": "0.00"})
         fmt_title  = workbook.add_format({"bold": True, "font_size": 12})
         fmt_wrap   = workbook.add_format({"text_wrap": True})
 
@@ -221,6 +225,15 @@ def export_summary_xlsx(run_out: str) -> str:
                     j = col_idx["Sharpe"]
                     ws_over.set_column(j, j, 10, fmt_num4)
 
+                # After writing the Instruments block
+                headersI = list(instr_rounded.columns)
+                cidxI = {h: i for i, h in enumerate(headersI)}
+                if "Mean Ann. Ret." in cidxI:
+                    ws_over.set_column(cidxI["Mean Ann. Ret."], cidxI["Mean Ann. Ret."], 12, fmt_pct2)
+                if "Skew" in cidxI:
+                    ws_over.set_column(cidxI["Skew"], cidxI["Skew"], 10, fmt_num4)
+
+
                 # Freeze header row of this table and add filter
                 ws_over.autofilter(start_row, 0, start_row + nrows, max(0, ncols - 1))
                 ws_over.freeze_panes(start_row + 1, 0)
@@ -248,6 +261,14 @@ def export_summary_xlsx(run_out: str) -> str:
                 if "Sharpe" in pidx:
                     ws_over.set_column(pidx["Sharpe"], pidx["Sharpe"], 10, fmt_num4)
 
+                # After writing the Portfolio block
+                headersP = list(port_rounded.columns)
+                cidxP = {h: i for i, h in enumerate(headersP)}
+                if "Mean Ann. Ret." in cidxP:
+                    ws_over.set_column(cidxP["Mean Ann. Ret."], cidxP["Mean Ann. Ret."], 12, fmt_pct2)
+                if "Skew" in cidxP:
+                    ws_over.set_column(cidxP["Skew"], cidxP["Skew"], 10, fmt_num4)
+
                 # Highlight portfolio row WITHOUT breaking number formats:
                 # apply a conditional format that only sets fill/bold, leaving num_format to column formats
                 pheaders = list(port_rounded.columns)
@@ -263,7 +284,7 @@ def export_summary_xlsx(run_out: str) -> str:
 
                 start_row += prow + 2
 
-        # ---------- Per-asset tests ----------
+        # ---------- Per-Asset Tests ----------
         rows = []
         for d in sorted(os.listdir(run_out)):
             sub = os.path.join(run_out, d)
@@ -282,22 +303,60 @@ def export_summary_xlsx(run_out: str) -> str:
                     row[f"PR_{c}"] = pr.iloc[0][c]
             if len(row) > 1:
                 rows.append(row)
+
         if rows:
             df_tests = pd.DataFrame(rows)
             df_tests = _round_numeric(df_tests)
+
             ws_over.write(start_row, 0, "Per-Asset Tests", fmt_title)
             start_row += 1
-            df_tests.to_excel(writer, sheet_name=sh, startrow=start_row, index=False)
-            start_row += len(df_tests) + 2
 
-        # ---------- Multiple-system selection bias (if present) ----------
+            # write via pandas (headers go at start_row)
+            df_tests.to_excel(writer, sheet_name=sh, startrow=start_row, index=False)
+
+            # >>> hard-apply numeric format per cell for all value columns (no conditional formats)
+            first_data_row = start_row + 1  # first data row (skip header written by pandas)
+            nrows = len(df_tests)
+            ncols = df_tests.shape[1]
+            # column 0 is "Instrument" (text) — leave it
+            for r in range(nrows):
+                for c in range(1, ncols):
+                    v = df_tests.iat[r, c]
+                    try:
+                        fv = float(v)
+                    except Exception:
+                        continue
+                    if pd.notna(fv):
+                        ws_over.write_number(first_data_row + r, c, fv, fmt_num4)
+
+            start_row += nrows + 2  # advance cursor (data rows + spacer)
+
+        # ---------- Multiple-System Selection Bias (if present) ----------
         multi = _safe_read_csv(os.path.join(run_out, "permutation_test_multiple.csv"))
-        if multi is not None:
+        if multi is not None and not multi.empty:
             multi = _round_numeric(multi)
+
             ws_over.write(start_row, 0, "Multiple-System Selection Bias", fmt_title)
             start_row += 1
+
+            # write via pandas
             multi.to_excel(writer, sheet_name=sh, startrow=start_row, index=False)
-            start_row += len(multi) + 2
+
+            # >>> hard-apply numeric cell formats (col 1..end; col 0 is "System")
+            first_data_row = start_row + 1
+            nrows = len(multi)
+            ncols = multi.shape[1]
+            for r in range(nrows):
+                for c in range(1, ncols):
+                    v = multi.iat[r, c]
+                    try:
+                        fv = float(v)
+                    except Exception:
+                        continue
+                    if pd.notna(fv):
+                        ws_over.write_number(first_data_row + r, c, fv, fmt_num4)
+
+            start_row += nrows + 2
 
         # ---------- Strategy Stats section ----------
         strat_dir = os.path.join(run_out, "strategies")
@@ -340,11 +399,11 @@ def export_summary_xlsx(run_out: str) -> str:
 
             # Percent-style columns
             pct_cols_strat = [
-                "CAGR", "Ann. Ret. Plain", "Ann. Ret. Log", "Ann.Vol", "Max DD", "Avg DD", "Daily Std",
+                "CAGR", "Ann. Ret. Log", "Ann.Vol", "Max DD", "Avg DD", "Daily Std",
                 "5% Tail", "95% Tail", "Avg Win", "Avg Loss", "Max Loss (Bar)",
                 "Avg 30d", "Avg 30d +2σ", "Avg 30d -2σ", "Avg 30d CI low", "Avg 30d CI high",
-                "Win Rate", "ROE"
-
+                "Win Rate", "ROE",
+                "Mean Ann. Ret.",
             ]
             for h in pct_cols_strat:
                 if h in cidx2:
@@ -360,6 +419,8 @@ def export_summary_xlsx(run_out: str) -> str:
             if "Expectancy" in cidx2:
                 # likely currency-like; keep as plain numeric with 2 decimals
                 ws_over.set_column(cidx2["Expectancy"], cidx2["Expectancy"], 14, fmt_num4)
+            if "Skew" in cidx2:
+                ws_over.set_column(cidx2["Skew"], cidx2["Skew"], 14, fmt_num4)
 
             start_row += len(df_strat) + 2
 
@@ -449,6 +510,44 @@ def export_summary_xlsx(run_out: str) -> str:
             if "Weight" in w_res.columns:
                 w_res["Weight"] = pd.to_numeric(w_res["Weight"], errors="coerce").fillna(0.0)
 
+            # --- Join IDM values (per instrument) ---
+            try:
+                idm_path = os.path.join(run_out, "idm_resolved.csv")
+                idm_df = _safe_read_csv(idm_path)
+                if idm_df is not None and not idm_df.empty:
+                    # Keep only what we need; align column names for merge
+                    idm_df = idm_df.drop(columns=["instrument"], errors="ignore")
+                    idm_df = idm_df.rename(columns={"symbol": "Asset", "strategy": "Strategy", "idm": "IDM"})
+                    idm_df["IDM"] = pd.to_numeric(idm_df["IDM"], errors="coerce")
+                    # (re)cap just in case
+                    idm_df["IDM"] = idm_df["IDM"].clip(upper=2.5)
+
+                    # Left-join onto weights by (Asset, Strategy)
+                    w_res = w_res.merge(idm_df[["Asset", "Strategy", "IDM"]],
+                                        on=["Asset", "Strategy"], how="left")
+                else:
+                    # No IDM file — at least add the column so the sheet shape is stable
+                    w_res["IDM"] = float("nan")
+            except Exception as e:
+                # If anything goes wrong, keep going without IDM
+                w_res["IDM"] = float("nan")
+
+            # --- Join forecast scales (per instrument) ---
+            try:
+                fs_path = os.path.join(run_out, "forecast_scale_resolved.csv")
+                fs_df = _safe_read_csv(fs_path)
+                if fs_df is not None and not fs_df.empty:
+                    fs_df = fs_df.drop(columns=["instrument"], errors="ignore")
+                    fs_df = fs_df.rename(
+                        columns={"symbol": "Asset", "strategy": "Strategy", "forecast_scale": "ForecastScale"})
+                    fs_df["ForecastScale"] = pd.to_numeric(fs_df["ForecastScale"], errors="coerce")
+                    w_res = w_res.merge(fs_df[["Asset", "Strategy", "ForecastScale"]], on=["Asset", "Strategy"],
+                                        how="left")
+                else:
+                    w_res["ForecastScale"] = float("nan")
+            except Exception:
+                w_res["ForecastScale"] = float("nan")
+
             # --- Per-asset table ---
             w_res_disp = _round_numeric(w_res.copy(), 6)
 
@@ -465,6 +564,8 @@ def export_summary_xlsx(run_out: str) -> str:
                 ws_wgt.set_column(cidx["Strategy"], cidx["Strategy"], 22)
             if "Weight" in cidx:
                 ws_wgt.set_column(cidx["Weight"], cidx["Weight"], 12, fmt_pct2)
+            if "IDM" in cidx:
+                ws_wgt.set_column(cidx["IDM"], cidx["IDM"], 8, fmt_num2)
 
             start += len(w_res_disp) + 2
 

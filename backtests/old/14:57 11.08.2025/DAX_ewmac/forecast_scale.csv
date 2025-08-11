@@ -1,0 +1,2 @@
+instrument,symbol,strategy,forecast_scale
+DAX|ewmac,DAX,ewmac,3.827977443770395

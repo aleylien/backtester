@@ -49,6 +49,9 @@ capital_policy:
   reinvesting_frequency: monthly   # weekly | monthly | quarterly (3M)
   rebalance_frequency: quarterly   # monthly | quarterly
 
+strategy_defaults:             # both params can be overwritten per strategy
+  use_buffer: true
+  buffer_F: 0.10
 
 # fee schedule
 fees:

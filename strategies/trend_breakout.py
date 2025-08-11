@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+from strategies.B_buffering import compute_buffer_contracts, apply_buffer_to_contracts
 
 
 def trend_breakout(
@@ -12,6 +13,8 @@ def trend_breakout(
         tau: float = 0.2,
         multiplier: float = 50.0,
         fx: float = 1.0,
+        buffer_F: float = 0.10,
+        use_buffer: bool = True,
 ) -> pd.DataFrame:
     # INPUTS
     horizon = int(horizon)
@@ -53,9 +56,26 @@ def trend_breakout(
 
 
     # BUFFERING
-    # skip for now
-
-    position = np.round(N_unrounded).astype(int)
+    initial_pos: int = 0
+    # --- Buffering (Carver) ---
+    if use_buffer:
+        B = compute_buffer_contracts(
+            price=price,
+            ann_std=ann_std,
+            capital=capital,
+            idm=idm,
+            tau=tau,
+            multiplier=multiplier,
+            fx=fx,
+            F=buffer_F,
+        )
+        position = apply_buffer_to_contracts(
+            N_unrounded=N_unrounded,
+            buffer_contracts=B,
+            initial_pos=initial_pos,
+        ).astype(int)
+    else:
+        position = np.round(N_unrounded).astype(int)
 
     return pd.DataFrame({
         'price': price,
@@ -66,5 +86,6 @@ def trend_breakout(
         'scaled_forecast': scaled,
         'capped_forecast': capped,
         'N_unrounded': N_unrounded,
-        'position': position
+        'position': position,
+        'forecast_scale': forecast_scale
     })

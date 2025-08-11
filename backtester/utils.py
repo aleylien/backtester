@@ -296,7 +296,7 @@ def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None
     # Only bars with a live position
     oos_pos = oos_full[oos_full['position'] != 0] if 'position' in oos_full.columns else oos_full
 
-    print("\n=== Per-Bundle Performance ===")
+    # print("\n=== Per-Bundle Performance ===")
     all_trade_pnls = []  # collect PnL of each trade across all bundles for aggregate stats
     for b, grp in oos_full.groupby('bundle'):
         eq = grp['equity']
@@ -409,13 +409,13 @@ def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None
         std_dev = ret.std()
         tail_5, tail_95 = np.percentile(ret, [5, 95]) if len(ret) > 0 else (np.nan, np.nan)
 
-        print(
-            f"Bundle {b}: CAGR={cagr:.2%}, Vol={ann_vol:.2%}, Sharpe={sharpe:.2f}, "
-            f" Mean 30-d return={mean_pm:.2%}, +2std={ci_high:.2%}, -2std={ci_low:.2%}, "
-            f"Sortino={sortino:.2f}, MaxDD={max_dd:.2%}, AvgDD={avg_dd:.2%}, "
-            f"AvgDDdur={avg_dd_dur:.1f}, PF={profit_factor:.2f}, Exp={expectancy:.2f}, "
-            f"WR={win_rate:.1%}, Std={std_dev:.4f}, 5%={tail_5:.2%}, 95%={tail_95:.2%}"
-        )
+        # print(
+        #     f"Bundle {b}: CAGR={cagr:.2%}, Vol={ann_vol:.2%}, Sharpe={sharpe:.2f}, "
+        #     f" Mean 30-d return={mean_pm:.2%}, +2std={ci_high:.2%}, -2std={ci_low:.2%}, "
+        #     f"Sortino={sortino:.2f}, MaxDD={max_dd:.2%}, AvgDD={avg_dd:.2%}, "
+        #     f"AvgDDdur={avg_dd_dur:.1f}, PF={profit_factor:.2f}, Exp={expectancy:.2f}, "
+        #     f"WR={win_rate:.1%}, Std={std_dev:.4f}, 5%={tail_5:.2%}, 95%={tail_95:.2%}"
+        # )
 
     # --- Aggregate Performance ---
     print("\n=== Aggregate Performance ===")
@@ -446,7 +446,6 @@ def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None
         r = r.dropna()
 
     ppy = _estimate_ppy_from_index(r.index)  # ✅ auto-detects trading days & intraday bars
-    annualised_return_plain = float((1.0 + r.mean()) ** ppy - 1.0)
     annualised_return_log = float(np.expm1(np.log1p(r).mean() * ppy))
 
     def _compute_oos_total_return(combined: pd.DataFrame) -> float:
@@ -488,6 +487,69 @@ def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None
     except Exception:
         total_oos_return = float("nan")
 
+    # === Mean annual return & Skew helpers ========================================
+    def _mean_annual_return_from_returns(rets: pd.DataFrame, min_months: int = 3) -> float:
+        """
+        Arithmetic mean of calendar-year returns:
+          For each calendar year y, Ry = (1 + r_t for t in y).prod() - 1
+          MeanAnnual = mean_y(Ry) over years with at least `min_months` of data.
+        Robust to missing days/intraday.
+        """
+        r = pd.to_numeric(rets, errors="coerce").dropna()
+        if r.empty:
+            return float("nan")
+        if not isinstance(r.index, pd.DatetimeIndex):
+            r.index = pd.to_datetime(r.index, errors="coerce")
+            r = r.dropna()
+            if r.empty:
+                return float("nan")
+
+        # group by calendar year; require min_months months of data in the year
+        out = []
+        by_year = dict(list(r.groupby(r.index.year)))
+        for y, x in by_year.items():
+            months = x.index.to_period("M").nunique()
+            if months >= min_months:
+                out.append(float((1.0 + x).prod() - 1.0))
+        if not out:
+            return float("nan")
+        return float(np.mean(out))
+
+    def _skew_from_returns(rets: pd.DataFrame) -> float:
+        """
+        Fisher–Pearson (bias-corrected) sample skewness.
+        Returns 0.0 if std ~ 0 to avoid NaN when the series is (almost) constant.
+        """
+        r = pd.to_numeric(rets, errors="coerce")
+        r = r.replace([np.inf, -np.inf], np.nan).dropna()
+        n = int(r.size)
+        if n < 3:
+            return float("nan")
+
+        # center
+        mu = float(r.mean())
+        x = r - mu
+        s = float(x.std(ddof=1))
+
+        if not np.isfinite(s) or s == 0.0:
+            return 0.0  # if returns are (almost) constant
+
+        m3 = float((x ** 3).mean())
+        g1 = m3 / (s ** 3)  # moment skewness
+
+        # bias-corrected sample skew (Fisher)
+        G1 = (np.sqrt(n * (n - 1)) / (n - 2)) * g1
+        return float(G1)
+
+    # ---- Mean annual return & Skew (NEW) ----
+    try:
+        mean_annual_return = _mean_annual_return_from_returns(all_rets)
+    except Exception:
+        mean_annual_return = float("nan")
+    try:
+        skew = _skew_from_returns(all_rets)
+    except Exception:
+        skew = float("nan")
 
     # Aggregate avg drawdown duration (same logic as per-bundle)
     dur_list = []
@@ -528,16 +590,17 @@ def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None
     avg_30d_ret_minus_2std = stats_30["avg_30d_ret_minus_2std"]
     avg_30d_ret_ci_low = stats_30["avg_30d_ret_ci_low"]
     avg_30d_ret_ci_high = stats_30["avg_30d_ret_ci_high"]
-    print(f"30d stats: {avg_30d_ret, avg_30d_ret_minus_2std, avg_30d_ret_plus_2std, avg_30d_ret_ci_low, avg_30d_ret_ci_high}")
+    # print(f"30d stats: {avg_30d_ret, avg_30d_ret_minus_2std, avg_30d_ret_plus_2std, avg_30d_ret_ci_low, avg_30d_ret_ci_high}")
 
     agg_stats = {
         'cagr': cagr_a,
-        'annualised_return_plain': annualised_return_plain,
+        "mean_annual_return": float(mean_annual_return),
         'annualised_return_log': annualised_return_log,
         'total_return': total_oos_return,
         'annual_vol': ann_vol_a,
         'sharpe': sharpe_a,
         'sortino': sortino_a,
+        "skew": float(skew),
         "avg_30d_ret": avg_30d_ret,
         "avg_30d_ret_plus_2std": avg_30d_ret_plus_2std,
         "avg_30d_ret_minus_2std": avg_30d_ret_minus_2std,

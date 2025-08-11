@@ -136,10 +136,78 @@ def run_backtest_for_instrument(inst, base_cfg, portfolio_cfg, fees_map, weight,
             idm_for_this_strategy = idm_yaml
         params['idm'] = idm_for_this_strategy
 
+        # ---- Buffering configuration: merge YAML defaults -> instrument overrides -> existing params ----
+        # Global defaults from YAML
+        _sd = (base_cfg.get("strategy_defaults") or {})
+        _glob_use_buffer = _sd.get("use_buffer", True)
+        _glob_buffer_F  = _sd.get("buffer_F", 0.10)
 
-        # Run strategy to get positions/forecasts for the OOS segment
+        # Per-instrument overrides from YAML (strategy.params)
+        _inst_params = (inst_cfg.get("strategy", {}).get("params") or {})
+
+        # Precedence: params (already set) > instrument override > global default
+        if "use_buffer" not in params:
+            params["use_buffer"] = bool(_inst_params.get("use_buffer", _glob_use_buffer))
+        else:
+            params["use_buffer"] = bool(params["use_buffer"])
+
+        if "buffer_F" not in params:
+            try:
+                params["buffer_F"] = float(_inst_params.get("buffer_F", _glob_buffer_F))
+            except Exception:
+                params["buffer_F"] = float(_glob_buffer_F)
+        else:
+            try:
+                params["buffer_F"] = float(params["buffer_F"])
+            except Exception:
+                params["buffer_F"] = float(_glob_buffer_F)
+
+        # Optional: an initial position for buffering to start from (default 0 contracts)
+        params.setdefault("initial_pos", 0)
+
         safe_params = filter_params_for_callable(strat_fn, params)
-        pos_df = strat_fn(oos_df, **safe_params)
+        res = strat_fn(oos_df, **safe_params)
+
+        # Support return types: DataFrame OR (DataFrame, meta)
+        meta = {}
+        if isinstance(res, tuple) and len(res) >= 1:
+            pos_df = res[0]
+            if len(res) >= 2 and isinstance(res[1], dict):
+                meta = res[1]
+        else:
+            pos_df = res
+
+        # ---- Forecast scale: try meta → DataFrame.attrs → column (last non-NaN) ----
+        forecast_scale_val = None
+        try:
+            if "forecast_scale" in meta:
+                forecast_scale_val = float(meta["forecast_scale"])
+            elif hasattr(pos_df, "attrs") and "forecast_scale" in pos_df.attrs:
+                forecast_scale_val = float(pos_df.attrs["forecast_scale"])
+            elif "forecast_scale" in pos_df.columns:
+                s = pd.to_numeric(pos_df["forecast_scale"], errors="coerce").dropna()
+                if not s.empty:
+                    forecast_scale_val = float(s.iloc[-1])
+        except Exception:
+            forecast_scale_val = None
+
+        # Save per-instrument forecast scale for later aggregation
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            if forecast_scale_val is not None and not (
+                    isinstance(forecast_scale_val, float) and np.isnan(forecast_scale_val)):
+                pd.DataFrame([{
+                    "instrument": f"{inst['symbol']}|{inst['strategy']['module']}",
+                    "symbol": inst["symbol"],
+                    "strategy": inst["strategy"]["module"],
+                    "forecast_scale": float(forecast_scale_val),
+                }]).to_csv(os.path.join(out_dir, "forecast_scale.csv"), index=False)
+            else:
+                logging.info("No forecast_scale returned for %s (%s).", inst.get("symbol"),
+                             inst["strategy"]["module"])
+        except Exception as e:
+            logging.warning("Could not save forecast_scale.csv for %s: %s", inst.get("symbol"), e)
+
         if 'position' not in pos_df.columns:
             raise ValueError(f"{symbol}: strategy output must contain a 'position' column (contracts).")
 
@@ -879,12 +947,40 @@ def main():
                 inst['strategy']['fx'] = sdef['fx']
             instruments.append(inst)
 
-    # ---- IDM: compute once per strategy (static) ----
+    # ---- IDM: compute once per strategy (static) + save per-instrument CSV ----
     try:
-        idm_map = compute_idm_map(cfg, instruments)
+        idm_map = compute_idm_map(cfg, instruments)  # returns {strategy_module: idm}
     except Exception as e:
         logging.warning("IDM computation failed; falling back to YAML idm scalars. Error: %s", e)
         idm_map = {}
+
+    # Safety cap (even though compute_idm_map now caps internally)
+    idm_map = {k: float(min(float(v), 2.5)) for k, v in (idm_map or {}).items()}
+
+    # We'll save an instrument-level CSV so you can audit assignments.
+    # Fallback IDM (if strategy missing from map)
+    idm_fallback = float((cfg.get('strategy') or {}).get('idm', 1.0))
+
+    rows = []
+    for inst in instruments:
+        sym = inst["symbol"]
+        strat = inst["strategy"]["module"]
+        idm_val = float(min(idm_map.get(strat, idm_fallback), 2.5))
+        # Use same "instrument" label style as weights_resolved.csv for consistency
+        instrument_label = f"{sym}|{strat}"
+        rows.append({
+            "instrument": instrument_label,
+            "symbol": sym,
+            "strategy": strat,
+            "idm": idm_val,
+        })
+
+    try:
+        idm_df = pd.DataFrame(rows)
+        os.makedirs(run_out, exist_ok=True)
+        idm_df.to_csv(os.path.join(run_out, "idm_resolved.csv"), index=False)
+    except Exception as e:
+        logging.warning("Could not save idm_resolved.csv: %s", e)
 
 
     # 1) Total capital from portfolio section
@@ -993,8 +1089,8 @@ def main():
 
     # Optional: keep a preferred order, then append any extras automatically
     BASE_COLS = [
-        "cagr", 'total_return', 'annualised_return_plain', 'annualised_return_log', "annual_vol", "sharpe", "sortino",
-        "max_drawdown", "avg_drawdown", "avg_dd_duration",
+        "cagr", 'total_return', 'mean_annual_return', 'annualised_return_log', "annual_vol", "sharpe", "sortino",
+        "skew", "max_drawdown", "avg_drawdown", "avg_dd_duration",
         "profit_factor", "expectancy", "win_rate",
         "std_daily", "ret_5pct", "ret_95pct",
         "avg_win", "avg_loss", "max_loss_pct",
@@ -1131,6 +1227,27 @@ def main():
 
     combined_stats_df.to_csv(combined_stats_path)
     print("✅ combined_stats.csv updated with final Portfolio stats (fields merged, 30d metrics preserved)")
+
+    # ---- Aggregate per-instrument forecast scales into run_out/forecast_scale_resolved.csv ----
+    try:
+        rows = []
+        for d in sorted(os.listdir(run_out)):
+            sub = os.path.join(run_out, d)
+            if not os.path.isdir(sub) or d in ("portfolio", "strategies"):
+                continue
+            f = os.path.join(sub, "forecast_scale.csv")
+            if os.path.exists(f):
+                df_fs = pd.read_csv(f)
+                if df_fs is not None and not df_fs.empty:
+                    rows.append(df_fs)
+        if rows:
+            fs_all = pd.concat(rows, ignore_index=True)
+        else:
+            # create an empty file with headers so downstream joins don't fail
+            fs_all = pd.DataFrame(columns=["instrument", "symbol", "strategy", "forecast_scale"])
+        fs_all.to_csv(os.path.join(run_out, "forecast_scale_resolved.csv"), index=False)
+    except Exception as e:
+        logging.warning("Could not aggregate forecast_scale.csv files: %s", e)
 
     # Generate Markdown summary report
     generate_summary_md(run_out, cfg, portfolio_cfg, save_per_asset, instruments)

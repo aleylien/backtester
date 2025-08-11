@@ -85,5 +85,7 @@ def compute_idm_map(cfg: dict, instruments: List[dict]) -> Dict[str, float]:
             continue
         R = pd.DataFrame(rets_cols).sort_index().tail(window)
         w = pd.Series(1.0, index=list(rets_cols.keys()))
-        out[strat] = _corr_idm(R, w, floor_neg, min_overlap, fallback)
+        val = _corr_idm(R, w, floor_neg, min_overlap, fallback)
+        # Cap at 2.5 as requested
+        out[strat] = float(min(val, 2.5))
     return out

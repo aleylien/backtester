@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+from strategies.B_buffering import compute_buffer_contracts, apply_buffer_to_contracts
 
 
 def ewmac(
@@ -13,7 +14,9 @@ def ewmac(
         fx: float = 1.0,
         span_short: int = 16,
         span_long: int = 64,
-) -> pd.DataFrame:
+        buffer_F: float = 0.10,
+        use_buffer: bool = True,
+):
     """
     Computes EWMA crossover forecasts, sizes positions to N contracts,
     simulates position (but not P&L here), and returns a DataFrame with:
@@ -63,12 +66,29 @@ def ewmac(
             / (10 * multiplier * price * fx * ann_std)
     )
 
-    # If there are NaNs (e.g., initial bars), treat them as 0 (no position due to insufficient data)
-    N_unrounded = N_unrounded.fillna(0.0)
-    # Round to integer contracts
-    position = np.round(N_unrounded).astype(int)
+    initial_pos: int = 0
 
-    return pd.DataFrame({
+    # --- Buffering (Carver) ---
+    if use_buffer:
+        B = compute_buffer_contracts(
+            price=price,
+            ann_std=ann_std,
+            capital=capital,
+            idm=idm,
+            tau=tau,
+            multiplier=multiplier,
+            fx=fx,
+            F=buffer_F,
+        )
+        position = apply_buffer_to_contracts(
+            N_unrounded=N_unrounded,
+            buffer_contracts=B,
+            initial_pos=initial_pos,
+        ).astype(int)
+    else:
+        position = np.round(N_unrounded).astype(int)
+
+    return (pd.DataFrame({
         'price': price,
         'price_diff': price_diff,
         'sigma_price': sigma_price,
@@ -78,5 +98,7 @@ def ewmac(
         'scaled_forecast': scaled,
         'capped_forecast': capped,
         'N_unrounded': N_unrounded,
-        'position': position
-    })
+        'position': position,
+        'forecast_scale': forecast_scale,
+        'buffer_contracts': B if use_buffer else pd.Series(0.0, index=N_unrounded.index),
+    }))
