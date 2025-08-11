@@ -1,0 +1,164 @@
+{
+  "data": {
+    "path": "./assets_data/all_time",
+    "timeframe": "1d",
+    "start": "2000-01-01",
+    "end": "2020-12-31",
+    "price_type": "normalised",
+    "normalized_price": {
+      "method": "ewm",
+      "window": 25,
+      "span": 25,
+      "min_periods": 10,
+      "scale": 100.0,
+      "start_value": 0.0
+    }
+  },
+  "optimization": {
+    "bundles": 10,
+    "target": "profit_factor",
+    "param_grid": {
+      "_module": [
+        "ewmac"
+      ],
+      "_function": [
+        "ewmac"
+      ],
+      "span_short": [
+        10,
+        16,
+        20
+      ],
+      "span_long": [
+        50,
+        64,
+        80
+      ],
+      "vol_window": [
+        32
+      ],
+      "forecast_scale": [
+        4.1
+      ],
+      "cap": [
+        20
+      ],
+      "tau": [
+        0.2
+      ],
+      "idm": [
+        1.0
+      ],
+      "multiplier": [
+        5.0
+      ],
+      "fx": [
+        1.0
+      ]
+    }
+  },
+  "output": {
+    "root": "./backtests",
+    "save_equity_curve": true,
+    "save_drawdown_chart": true,
+    "save_per_asset": 1,
+    "save_per_instrument": true,
+    "save_per_strategy": true,
+    "plots.per_strategy": true
+  },
+  "statistics": {
+    "period_resolution": "monthly"
+  },
+  "idm": {
+    "enabled": true,
+    "mode": "static",
+    "floor_negatives": true,
+    "min_overlap": 60,
+    "window": 250,
+    "returns_freq": "daily",
+    "fallback": 1.0
+  },
+  "capital_policy": {
+    "mode": "none",
+    "reinvesting_frequency": "monthly",
+    "rebalance_frequency": "quarterly"
+  },
+  "strategy_defaults": {
+    "use_buffer": true,
+    "buffer_F": 0.1
+  },
+  "fees": {
+    "mapping": "./config/fees.json"
+  },
+  "fx": {
+    "base_currency": "USD",
+    "pairs_csv_dir": "assets_data/fx",
+    "symbol_currency_map_file": "config/symbol_currency_map.json"
+  },
+  "market_meta": {
+    "multipliers_file": "config/multipliers.json"
+  },
+  "portfolio": {
+    "capital": 100000,
+    "tau": [
+      0.2
+    ],
+    "assets": [
+      "SP500",
+      "DAX"
+    ],
+    "strategies": {
+      "ewmac": {
+        "module": "ewmac",
+        "function": "ewmac",
+        "param_grid": {
+          "span_short": [
+            10,
+            16,
+            20
+          ],
+          "span_long": [
+            50,
+            64,
+            80
+          ],
+          "vol_window": [
+            32
+          ],
+          "cap": [
+            20
+          ],
+          "idm": [
+            1.0
+          ]
+        }
+      },
+      "trend_breakout": {
+        "module": "trend_breakout",
+        "function": "trend_breakout",
+        "param_grid": {
+          "horizon": [
+            20,
+            25,
+            40,
+            50,
+            75,
+            80
+          ],
+          "cap": [
+            20
+          ],
+          "vol_window": [
+            32
+          ]
+        }
+      }
+    },
+    "assignments": {
+      "default": [
+        "ewmac",
+        "trend_breakout"
+      ]
+    }
+  }
+}

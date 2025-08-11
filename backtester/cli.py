@@ -1,5 +1,6 @@
 import argparse
 import logging, os, json
+import shutil
 from collections import Counter
 
 import numpy as np
@@ -1285,6 +1286,48 @@ def main():
         print(f"📊 summary.xlsx created → {xlsx_path}")
     except Exception as e:
         logging.warning("Excel export failed: %s", e)
+
+    # ---- Tidy: move per-instrument folders into run_out/instruments ----
+    try:
+        dest_root = os.path.join(run_out, "instruments")
+        os.makedirs(dest_root, exist_ok=True)
+
+        # Folders we should not move
+        exclude = {"portfolio", "strategies"}
+
+        for name in sorted(os.listdir(run_out)):
+            src = os.path.join(run_out, name)
+            if not os.path.isdir(src):
+                continue
+            if name in exclude:
+                continue
+            # Heuristic: instrument folders use "asset_strategy" naming
+            if "_" not in name:
+                continue
+
+            # Make sure it's really an instrument result folder (has marker files)
+            has_marker = any(
+                os.path.exists(os.path.join(src, fn))
+                for fn in (
+                    "details_all_bundles.csv",
+                    "stats.csv",
+                    "permutation_test_oos.csv",
+                    "positions.csv",
+                )
+            )
+            if not has_marker:
+                continue
+
+            dst = os.path.join(dest_root, name)
+            # Overwrite if already exists (e.g., re-runs)
+            if os.path.exists(dst):
+                shutil.rmtree(dst)
+            shutil.move(src, dst)
+
+        logging.info("Moved per-instrument folders into: %s", dest_root)
+    except Exception as e:
+        logging.warning("Tidy-up move of per-instrument folders failed: %s", e)
+
 
 
 if __name__ == '__main__':
