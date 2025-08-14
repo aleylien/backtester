@@ -54,7 +54,7 @@ idm:
   fallback: 1.0                # used when not enough overlap
 
 capital_policy:
-  mode: none                   # none | reinvesting | periodic_rebalance
+  mode: reinvesting                 # none | reinvesting | periodic_rebalance
   reinvesting_frequency: monthly   # weekly | monthly | quarterly (3M)
   rebalance_frequency: quarterly   # monthly | quarterly
 

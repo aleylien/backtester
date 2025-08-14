@@ -1,5 +1,0 @@
-instrument,symbol,strategy,idm
-SP500|ewmac,SP500,ewmac,1.0110792379745244
-SP500|trend_breakout,SP500,trend_breakout,1.0110792379745244
-NASDAQ|ewmac,NASDAQ,ewmac,1.0110792379745244
-NASDAQ|trend_breakout,NASDAQ,trend_breakout,1.0110792379745244

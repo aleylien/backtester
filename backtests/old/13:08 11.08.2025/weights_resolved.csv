@@ -1,5 +1,0 @@
-instrument,symbol,strategy,weight
-SP500|ewmac,SP500,ewmac,0.25
-SP500|trend_breakout,SP500,trend_breakout,0.25
-DAX|ewmac,DAX,ewmac,0.25
-DAX|trend_breakout,DAX,trend_breakout,0.25
