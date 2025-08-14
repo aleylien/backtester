@@ -1,0 +1,5 @@
+instrument,symbol,strategy,weight
+SP500|ewmac,SP500,ewmac,0.25
+SP500|trend_breakout,SP500,trend_breakout,0.25
+NASDAQ|ewmac,NASDAQ,ewmac,0.25
+NASDAQ|trend_breakout,NASDAQ,trend_breakout,0.25

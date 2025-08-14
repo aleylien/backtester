@@ -33,6 +33,103 @@ from strategies.A_weights import get_portfolio_weights
 from backtester.normalised_price import compute_normalised_price
 
 
+# === NEW: integrity checks & diagnostics ===
+
+def _max_drawdown_window(equity: pd.Series):
+    """
+    Return (start_date, end_date, max_drawdown_float) for the equity series.
+    Drawdown is (cummax - equity)/cummax.
+    """
+    if equity is None or len(equity) == 0:
+        return None
+    eq = pd.Series(pd.to_numeric(equity, errors="coerce")).dropna()
+    if eq.empty:
+        return None
+    cummax = eq.cummax()
+    dd = (cummax - eq) / cummax
+    i_trough = int(dd.values.argmax())
+    if i_trough <= 0 or not np.isfinite(dd.iloc[i_trough]):
+        return None
+    peak_val = float(cummax.iloc[i_trough])
+    # Peak is first time cummax hit that value up to the trough
+    i_peak = int(np.where(cummax.values[:i_trough + 1] == peak_val)[0][0])
+    return eq.index[i_peak], eq.index[i_trough], float(dd.iloc[i_trough])
+
+
+def _save_components_at_maxdd(out_port: str,
+                              port_equity: pd.Series,
+                              per_inst_results: list,
+                              instrument_names: list) -> None:
+    """
+    For the portfolio's worst DD window, compute each component's DD within that window.
+    Saves: portfolio/components_at_portfolio_maxDD.csv
+    """
+    res = _max_drawdown_window(port_equity)
+    if res is None:
+        return
+    t0, t1, port_dd = res
+    rows = []
+    for name, df_inst in zip(instrument_names, per_inst_results):
+        df = df_inst.copy()
+        df['date'] = pd.to_datetime(df['date'])
+        df.set_index('date', inplace=True)
+        eq_leg = pd.to_numeric(df.get('equity', pd.Series(dtype=float)), errors="coerce").dropna()
+        eq_win = eq_leg.loc[(eq_leg.index >= t0) & (eq_leg.index <= t1)]
+        if eq_win.empty:
+            dd_leg = float('nan')
+        else:
+            cm = eq_win.cummax()
+            dd_win = (cm - eq_win) / cm
+            dd_leg = float(dd_win.max())
+        rows.append({
+            'component': name,
+            'dd_in_portfolio_window': dd_leg,
+            'portfolio_window_start': pd.Timestamp(t0),
+            'portfolio_window_end': pd.Timestamp(t1),
+            'portfolio_max_dd': port_dd
+        })
+    pd.DataFrame(rows).to_csv(os.path.join(out_port, 'components_at_portfolio_maxDD.csv'), index=False)
+
+
+def _save_portfolio_integrity_checks(out_port: str,
+                                     df_port: pd.DataFrame,
+                                     pnl_by_symbol: dict,
+                                     port_equity: pd.Series,
+                                     tol: float = 1e-9) -> None:
+    """
+    Save JSON with:
+      - max |Δportfolio_equity - portfolio_pnl|
+      - max |sum(leg_pnl) - portfolio_pnl|   (aligned)
+    File: portfolio/checks.json
+    """
+    dfp = df_port.copy()
+    dfp['date'] = pd.to_datetime(dfp['date'])
+    dfp.set_index('date', inplace=True)
+
+    dEQ = pd.to_numeric(dfp['equity'], errors="coerce").diff().fillna(0.0)
+    port_pnl = pd.to_numeric(dfp['pnl'], errors="coerce").fillna(0.0)
+    max_abs_diff_dEq_pnl = float((dEQ - port_pnl).abs().max())
+
+    leg = pd.DataFrame(pnl_by_symbol).copy()
+    leg.index = pd.to_datetime(leg.index)
+    leg = leg.sort_index()
+    sum_legs = leg.sum(axis=1)
+
+    # Align to portfolio pnl index; fill missing with 0
+    sum_legs_aligned, port_pnl_aligned = sum_legs.align(port_pnl, join='outer', fill_value=0.0)
+    max_abs_diff_sumleg = float((sum_legs_aligned - port_pnl_aligned).abs().max())
+
+    checks = {
+        'max_abs_diff_delta_equity_minus_portfolio_pnl': max_abs_diff_dEq_pnl,
+        'max_abs_diff_sum_of_legs_minus_portfolio_pnl': max_abs_diff_sumleg,
+        'tolerance': tol,
+        'pass_delta_equity_equals_pnl': bool(max_abs_diff_dEq_pnl <= tol),
+        'pass_sum_of_legs_equals_portfolio_pnl': bool(max_abs_diff_sumleg <= tol)
+    }
+    with open(os.path.join(out_port, 'checks.json'), 'w') as f:
+        json.dump(checks, f, indent=2, default=str)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Backtester CLI: run backtests and statistical tests")
     parser.add_argument("-c", "--config", required=True, help="Path to strategy_config.yaml")
@@ -524,6 +621,9 @@ def aggregate_portfolio(per_inst_results: list, instruments: list, instrument_na
             'bundle': 1
         })
         df_port.to_csv(os.path.join(out_port, 'details_all_bundles.csv'), index=False)
+        # NEW: save integrity checks + components-at-maxDD diagnostics
+        _save_portfolio_integrity_checks(out_port, df_port, pnl_by_symbol, port_equity)
+        _save_components_at_maxdd(out_port, port_equity, per_inst_results, symbols)
 
         # Stats via your central function
         portfolio_stats = compute_statistics(df_port, out_port, config=base_cfg)
@@ -1118,11 +1218,31 @@ def main():
 
     # Optional: keep a preferred order, then append any extras automatically
     BASE_COLS = [
-        "cagr", 'total_return', 'mean_annual_return', 'annualised_return_log', "annual_vol", "sharpe", "sortino",
-        "skew", "max_drawdown", "avg_drawdown", "avg_dd_duration",
-        "profit_factor", "expectancy", "win_rate",
-        "std_daily", "ret_5pct", "ret_95pct",
-        "avg_win", "avg_loss", "max_loss_pct",
+        "cagr",
+        'cagr_geom',
+        'cagr_equity'
+        'mean_annual_return',
+        'annualised_return_log',
+        'total_return',
+        "annual_vol",
+        "sharpe",
+        "sortino",
+        "skew",
+        "max_drawdown",
+        "avg_drawdown",
+        "avg_dd_duration",
+        "profit_factor",
+        "expectancy",
+        'expectancy_usd'
+        'expectancy_pct'
+        'expectancy'
+        "win_rate",
+        "std_daily",
+        "ret_5pct",
+        "ret_95pct",
+        "avg_win",
+        "avg_loss",
+        "max_loss_pct",
     ]
     EXTRA_30D = [
         "avg_30d_ret",

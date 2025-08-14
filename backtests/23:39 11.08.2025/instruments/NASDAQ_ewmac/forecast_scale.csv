@@ -1,0 +1,2 @@
+instrument,symbol,strategy,forecast_scale
+NASDAQ|ewmac,NASDAQ,ewmac,3.699838418666146

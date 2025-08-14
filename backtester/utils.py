@@ -393,45 +393,70 @@ def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None
         avg_dd_dur = np.mean(durs) if durs else 0
 
         # **Trade-level performance stats**
-        positions = grp['position']
-        pnl_series = grp['pnl']
-        trade_pnls = []
-        current_pnl = 0.0
-        last_sign = 0  # track the sign of the last open position (1 for long, -1 for short, 0 for flat)
+        positions = grp['position'].values if 'position' in grp.columns else np.zeros(len(grp))
+        pnl_series = grp['pnl'].values if 'pnl' in grp.columns else np.zeros(len(grp))
+        eq_series = grp['equity'].values if 'equity' in grp.columns else np.zeros(len(grp))
 
-        for pos, pnl in zip(positions, pnl_series):
+        trade_pnls = []
+        trade_returns = []
+
+        current_pnl = 0.0
+        last_sign = 0
+        entry_equity = np.nan
+
+        for i in range(len(positions)):
+            pos = positions[i]
+            pnl = pnl_series[i]
             sign = 0 if pos == 0 else (1 if pos > 0 else -1)
+
             if last_sign == 0 and sign != 0:
                 # Trade opens
                 last_sign = sign
                 current_pnl = 0.0
+                # equity at entry is previous bar's equity if available, else current
+                eq_prev = eq_series[i - 1] if i - 1 >= 0 else eq_series[i]
+                entry_equity = float(eq_prev) if np.isfinite(eq_prev) and eq_prev != 0 else float(eq_series[i])
                 current_pnl += pnl  # include any immediate cost on entry
+
             elif last_sign != 0:
                 if sign == 0:
                     # Trade closes
-                    current_pnl += pnl  # include PnL on the closing bar
+                    current_pnl += pnl
                     trade_pnls.append(current_pnl)
+                    if np.isfinite(entry_equity) and entry_equity != 0.0:
+                        trade_returns.append(current_pnl / entry_equity)
                     last_sign = 0
                     current_pnl = 0.0
+                    entry_equity = np.nan
+
                 elif sign != last_sign:
-                    # Position flipped direction (close old trade and start new back-to-back)
-                    # Split the current bar's PnL between the closing trade and the new trade
+                    # Flip: close old, start new, split PnL across both
                     half_pnl = pnl * 0.5
                     current_pnl += half_pnl
-                    trade_pnls.append(current_pnl)  # close old trade with half the bar's PnL
-                    # Start a new trade with remaining half PnL
+                    trade_pnls.append(current_pnl)
+                    if np.isfinite(entry_equity) and entry_equity != 0.0:
+                        trade_returns.append(current_pnl / entry_equity)
+                    # start new trade
                     last_sign = sign
                     current_pnl = half_pnl
-                    # (Note: We continue in a trade with the new direction)
+                    eq_prev = eq_series[i]
+                    entry_equity = float(eq_prev) if np.isfinite(eq_prev) and eq_prev != 0 else float(eq_series[i])
+
                 else:
-                    # Still in an open trade
                     current_pnl += pnl
 
-        # If a trade is still open at end of bundle, close it at final equity (assume zero PnL beyond last bar)
+        # If a trade is still open at end, close it on the last bar
         if last_sign != 0:
             trade_pnls.append(current_pnl)
-        # Add this bundle's trades to the aggregate list
+            if np.isfinite(entry_equity) and entry_equity != 0.0:
+                trade_returns.append(current_pnl / entry_equity)
+
+        # Add to aggregates
         all_trade_pnls.extend(trade_pnls)
+        # NEW: also keep % returns per trade
+        if 'all_trade_returns' not in locals():
+            all_trade_returns = []
+        all_trade_returns.extend(trade_returns)
 
         # Calculate trade-level metrics for this bundle
         total_trades = len(trade_pnls)
@@ -458,7 +483,7 @@ def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None
         # )
 
     # --- Aggregate Performance ---
-    print("\n=== Aggregate Performance ===")
+    # print("\n=== Aggregate Performance ===")
     # Aggregate daily returns across all bundles (for aggregate Sharpe, Sortino, etc.)
     all_rets = pd.concat([g['equity'].pct_change().dropna() for _, g in oos_full.groupby('bundle')])
 
@@ -612,14 +637,22 @@ def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None
     tail_5_a, tail_95_a = np.percentile(all_rets, [5, 95]) if len(all_rets) > 0 else (np.nan, np.nan)
 
     # **Aggregate trade-level stats**
+    # === Aggregate trade-level stats across OOS bundles ===
     total_trades_a = len(all_trade_pnls)
     wins_count_a = sum(1 for p in all_trade_pnls if p > 0)
     loss_count_a = sum(1 for p in all_trade_pnls if p < 0)
-    win_rate_a = (wins_count_a / (wins_count_a + loss_count_a)) if (wins_count_a + loss_count_a) > 0 else np.nan
     total_win_a = sum(p for p in all_trade_pnls if p > 0)
     total_loss_a = sum(p for p in all_trade_pnls if p < 0)
+
     pf_a = (total_win_a / -total_loss_a) if loss_count_a > 0 else (np.inf if wins_count_a > 0 else np.nan)
-    expectancy_a = (sum(all_trade_pnls) / total_trades_a) if total_trades_a > 0 else np.nan
+    expectancy_usd = (sum(all_trade_pnls) / total_trades_a) if total_trades_a > 0 else np.nan
+
+    # NEW: expectancy in % per trade (mean of per-trade returns)
+    try:
+        expectancy_pct = float(np.mean(all_trade_returns)) if 'all_trade_returns' in locals() and len(
+            all_trade_returns) > 0 else float('nan')
+    except Exception:
+        expectancy_pct = float('nan')
 
     std_dev_a = all_rets.std()
     avg_win_a = all_rets[all_rets > 0].mean() if len(all_rets[all_rets > 0]) > 0 else 0.0
@@ -635,26 +668,78 @@ def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None
     avg_30d_ret_ci_high = stats_30["avg_30d_ret_ci_high"]
     # print(f"30d stats: {avg_30d_ret, avg_30d_ret_minus_2std, avg_30d_ret_plus_2std, avg_30d_ret_ci_low, avg_30d_ret_ci_high}")
 
+    # === Aggregate metrics across all OOS bundles (stitched) ===
+    all_rets = pd.concat([g['equity'].pct_change().dropna() for _, g in oos_full.groupby('bundle')])
+    cagr_geom = _safe_cagr_from_returns(all_rets)
+    ann_vol_a = all_rets.std() * np.sqrt(periods) if all_rets.std() > 0 else np.nan
+    sharpe_a = (all_rets.mean() / all_rets.std() * np.sqrt(periods)) if all_rets.std() > 0 else np.nan
+    neg_a = all_rets[all_rets < 0]
+    sortino_a = (all_rets.mean() / neg_a.std() * np.sqrt(periods)) if len(neg_a) > 0 else np.nan
+
+    # Log-based (geom) annualized return from bar returns; calendar-year arithmetic mean as an extra view
+    r_safe = _clean_returns_series(all_rets)
+    annualised_return_log = float(np.expm1(np.log1p(r_safe).mean() * periods))
+    try:
+        mean_annual_return = _mean_annual_return_from_returns(all_rets)
+    except Exception:
+        mean_annual_return = float('nan')
+
+    # Stitched total return across OOS
+    total_oos_return = _compute_oos_total_return(oos_full)
+
+    # Stitched drawdowns
+    eq_full = pd.concat([g['equity'] for _, g in oos_full.groupby('bundle')])
+    dd_full = (eq_full.cummax() - eq_full) / eq_full.cummax()
+    max_dd_a = float(dd_full.max())
+    avg_dd_a = float(dd_full[dd_full > 0].mean())
+
+    # Avg DD duration (bars)
+    dur_list = []
+    for _, grp in oos_full.groupby('bundle'):
+        curr = 0
+        for x in grp['drawdown']:
+            if x > 0:
+                curr += 1
+            else:
+                if curr > 0:
+                    dur_list.append(curr)
+                    curr = 0
+        if curr > 0:
+            dur_list.append(curr)
+    avg_dd_dur_a = np.mean(dur_list) if dur_list else 0
+
+    # Distribution tails and bar stats
+    tail_5_a, tail_95_a = np.percentile(all_rets, [5, 95]) if len(all_rets) > 0 else (np.nan, np.nan)
+    std_dev_a = all_rets.std()
+    avg_win_a = all_rets[all_rets > 0].mean() if len(all_rets[all_rets > 0]) > 0 else 0.0
+    avg_loss_a = all_rets[all_rets < 0].mean() if len(all_rets[all_rets < 0]) > 0 else 0.0
+    max_loss_bar_a = all_rets.min() if len(all_rets) > 0 else 0.0
+
+    # (Keep 'cagr' for backward compatibility; it is geometric.)
     agg_stats = {
-        'cagr': cagr_a,
-        "mean_annual_return": float(mean_annual_return),
+        'cagr': cagr_geom,
+        'cagr_geom': cagr_geom,
+        'cagr_equity': _safe_cagr_from_returns(eq_full.pct_change().dropna()),
+        'mean_annual_return': float(mean_annual_return),
         'annualised_return_log': annualised_return_log,
         'total_return': total_oos_return,
         'annual_vol': ann_vol_a,
         'sharpe': sharpe_a,
         'sortino': sortino_a,
-        "skew": float(skew),
+        'skew': skew,
+        'max_drawdown': max_dd_a,
+        'avg_drawdown': avg_dd_a,
+        'avg_dd_duration': avg_dd_dur_a,
+        'profit_factor': pf_a,
+        'expectancy_usd': expectancy_usd,
+        'expectancy_pct': expectancy_pct,
+        'expectancy': expectancy_usd,  # alias for compatibility
         "avg_30d_ret": avg_30d_ret,
         "avg_30d_ret_plus_2std": avg_30d_ret_plus_2std,
         "avg_30d_ret_minus_2std": avg_30d_ret_minus_2std,
         "avg_30d_ret_ci_low": avg_30d_ret_ci_low,
         "avg_30d_ret_ci_high": avg_30d_ret_ci_high,
-        'max_drawdown': max_dd_a,
-        'avg_drawdown': avg_dd_a,
-        'avg_dd_duration': avg_dd_dur_a,
-        'profit_factor': pf_a,
-        'expectancy': expectancy_a,
-        'win_rate': win_rate_a,
+        'win_rate': (wins_count_a / (wins_count_a + loss_count_a)) if (wins_count_a + loss_count_a) > 0 else np.nan,
         'std_daily': std_dev_a,
         'ret_5pct': tail_5_a,
         'ret_95pct': tail_95_a,
@@ -662,6 +747,9 @@ def compute_statistics(combined: pd.DataFrame, run_out: str, config: dict = None
         'avg_loss': avg_loss_a if not np.isnan(avg_loss_a) else 0.0,
         'max_loss_pct': max_loss_bar_a if not np.isnan(max_loss_bar_a) else 0.0
     }
+
+    pd.DataFrame([agg_stats]).to_csv(os.path.join(run_out, "strategy_statistics.csv"), index=False)
+
     # Save aggregate CSV
     pd.DataFrame([agg_stats]).to_csv(
         os.path.join(run_out, "strategy_statistics.csv"), index=False
