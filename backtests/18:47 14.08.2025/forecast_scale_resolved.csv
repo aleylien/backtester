@@ -1,5 +1,0 @@
-instrument,symbol,strategy,forecast_scale
-NASDAQ|ewmac,NASDAQ,ewmac,3.699838418666146
-NASDAQ|trend_breakout,NASDAQ,trend_breakout,0.8838774541740265
-SP500|ewmac,SP500,ewmac,3.327909283564681
-SP500|trend_breakout,SP500,trend_breakout,0.9185002104789888

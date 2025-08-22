@@ -80,16 +80,16 @@ def export_summary_xlsx(run_out: str) -> str:
 
     def _apply_common_formats(ws, headers, *, fmt_pct2, fmt_num4, fmt_num2):
         cidx = {h: i for i, h in enumerate(headers)}
-        pct_cols = ["CAGR", "Ann.Vol", "Max DD", "Avg DD", "Win Rate",
-                    "Avg 30d", "Avg 30d +2σ", "Avg 30d -2σ", "Avg 30d CI low", "Avg 30d CI high"
-                    , "Ann. Ret. Log", "Mean Ann. Ret."]
+        pct_cols = ["CAGR", "CAGR (Equity)", "Ann.Vol", "Max DD", "Avg DD", "Win Rate",
+                    "Avg 30d", "Avg 30d +2σ", "Avg 30d -2σ", "Avg 30d CI low", "Avg 30d CI high",
+                    "Ann. Ret. Log", "Mean Ann. Ret.", "Expectancy %"]
         for h in pct_cols:
             if h in cidx:
                 ws.set_column(cidx[h], cidx[h], 12, fmt_pct2)
         for h in ["Sharpe", "Sortino"]:
             if h in cidx:
                 ws.set_column(cidx[h], cidx[h], 10, fmt_num4)
-        for h in ["Avg DD Dur", "Profit Factor", "Expectancy"]:
+        for h in ["Avg DD Dur", "Profit Factor", "Expectancy", "Expectancy $"]:
             if h in cidx:
                 ws.set_column(cidx[h], cidx[h], 12, fmt_num2)
 
@@ -123,14 +123,20 @@ def export_summary_xlsx(run_out: str) -> str:
         "avg_30d_ret_ci_high": "Avg 30d CI high",
         "avg_cost_pct": "Avg Cost",
         "cost_sharp": "SR Cost",
+        # NEW fields
+        "cagr_geom": "CAGR (Geom)",
+        "cagr_equity": "CAGR (Equity)",
+        "expectancy_usd": "Expectancy $",
+        "expectancy_pct": "Expectancy %",
+
     }
 
     # columns we want to show as percentages (remain numeric; formatted via Excel)
     pct_cols_overview = [
-        "CAGR", "Ann.Vol", "Max DD", "Avg DD", "5% Tail", "95% Tail",
+        "CAGR", "CAGR (Equity)", "Ann.Vol", "Max DD", "Avg DD", "5% Tail", "95% Tail",
         "Avg Win", "Avg Loss", "Max Loss (Bar)", "Avg 30d", "Avg 30d +2σ",
         "Avg 30d -2σ", "Avg 30d CI low", "Avg 30d CI high", "Avg Cost", "Ann. Ret. Log", "ROE",
-        "Mean Ann. Ret.",
+        "Mean Ann. Ret.", "Expectancy %",
         # NOTE: Sharpe is unitless → not formatted as %
     ]
 
@@ -162,10 +168,23 @@ def export_summary_xlsx(run_out: str) -> str:
         "avg_30d_ret_minus_2std": "Avg 30d -2σ",
         "avg_30d_ret_ci_low": "Avg 30d CI low",
         "avg_30d_ret_ci_high": "Avg 30d CI high",
+        # NEW fields
+        "cagr_geom": "CAGR (Geom)",
+        "cagr_equity": "CAGR (Equity)",
+        "expectancy_usd": "Expectancy $",
+        "expectancy_pct": "Expectancy %",
     }
 
-    # Paths we'll use
-    comb_path = os.path.join(run_out, "combined_stats.csv")
+    # Paths we'll use (support both filenames)
+    comb_path = None
+    for _cand in ("combined_stats.csv", "combined_statistics.csv"):
+        _p = os.path.join(run_out, _cand)
+        if os.path.exists(_p):
+            comb_path = _p
+            break
+    # Fallback (keeps behavior if neither exists)
+    if comb_path is None:
+        comb_path = os.path.join(run_out, "combined_stats.csv")
 
     xlsx_path = os.path.join(run_out, "summary.xlsx")
     with pd.ExcelWriter(xlsx_path, engine="xlsxwriter") as writer:
@@ -403,7 +422,7 @@ def export_summary_xlsx(run_out: str) -> str:
                 "5% Tail", "95% Tail", "Avg Win", "Avg Loss", "Max Loss (Bar)",
                 "Avg 30d", "Avg 30d +2σ", "Avg 30d -2σ", "Avg 30d CI low", "Avg 30d CI high",
                 "Win Rate", "ROE",
-                "Mean Ann. Ret.",
+                "Mean Ann. Ret.", "Expectancy %",
             ]
             for h in pct_cols_strat:
                 if h in cidx2:
@@ -421,6 +440,8 @@ def export_summary_xlsx(run_out: str) -> str:
                 ws_over.set_column(cidx2["Expectancy"], cidx2["Expectancy"], 14, fmt_num4)
             if "Skew" in cidx2:
                 ws_over.set_column(cidx2["Skew"], cidx2["Skew"], 14, fmt_num4)
+            if "Expectancy $" in cidx2:
+                ws_over.set_column(cidx2["Expectancy $"], cidx2["Expectancy $"], 14, fmt_num4)
 
             start_row += len(df_strat) + 2
 

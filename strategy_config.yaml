@@ -16,7 +16,7 @@ data:
 
 # global optimization defaults (can be overridden per-strategy below)
 optimization:
-  bundles: 10
+  bundles: 5
   target:  pnl  # sharpe, pnl, profit_factor, max_drawdown
   param_grid:
     _module:       ['ewmac']
@@ -76,12 +76,16 @@ market_meta:
 portfolio:
   # single total capital for the whole run
   capital: 100000
-  tau: [0.2]
+  tau: [0.3]
   #  max_open_trades: 4 uncomment if find-signal mode needed
 
   assets:
     - SP500
     - NASDAQ
+    - DAX
+    - DJ30
+    - BTC
+    - FTSE
 
   strategies:
     ewmac:

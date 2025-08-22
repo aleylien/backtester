@@ -1,7 +1,0 @@
-{
-  "max_abs_diff_delta_equity_minus_portfolio_pnl": 2.1742607714259066e-11,
-  "max_abs_diff_sum_of_legs_minus_portfolio_pnl": 0.0,
-  "tolerance": 1e-09,
-  "pass_delta_equity_equals_pnl": true,
-  "pass_sum_of_legs_equals_portfolio_pnl": true
-}
